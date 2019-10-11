@@ -3,6 +3,15 @@
 volatile uint32_t dmacPeriod;
 volatile uint32_t dmacPulsewidth;
 
+uint16_t divisor = 48000;
+
+uint8_t muxA = 10;
+uint8_t muxB = 11;
+
+const uint8_t numSensors = 6;
+uint16_t freqValues[numSensors];
+
+
 typedef struct                              // DMAC descriptor structure
 {
   uint16_t btctrl;
@@ -16,11 +25,29 @@ volatile dmacdescriptor wrb[12] __attribute__ ((aligned (16)));               //
 dmacdescriptor descriptor_section[12] __attribute__ ((aligned (16)));         // DMAC channel descriptors
 dmacdescriptor descriptor __attribute__ ((aligned (16)));                     // Place holder descriptor
 
+void setupTCC();
+void changeMuxInput(bool A, bool B);
+
+
 void setup()
 {
   Serial.begin(115200);                  // Send data back on the Zero's native port
   while(!Serial);                        // Wait for the Serial port to be ready
- 
+  
+  //Sets up the registers for calculating frequency
+  setupTCC();
+
+  pinMode(muxA,OUTPUT);
+  pinMode(muxB,OUTPUT);
+
+
+  //Set the mux to input 0
+  changeMuxInput(0,0);
+
+}
+
+void setupTCC()
+{
   DMAC->BASEADDR.reg = (uint32_t)descriptor_section;                // Set the descriptor section base address
   DMAC->WRBADDR.reg = (uint32_t)wrb;                                // Set the write-back descriptor base adddress
   DMAC->CTRL.reg = DMAC_CTRL_DMAENABLE | DMAC_CTRL_LVLEN(0xf);      // Enable the DMAC and priority levels
@@ -101,10 +128,31 @@ void setup()
   DMAC->CHCTRLA.reg |= DMAC_CHCTRLA_ENABLE;         // Enable DMAC channel 1
 }
 
+void changeMuxInput(bool A, bool B)
+{
+  digitalWrite(muxA,A);
+  digitalWrite(muxB,B);
+}
+
+void scanAllChannels(int numChannels,uint16_t *whereToSave)
+{
+  for(int i = 0; i < numChannels; i++)
+  {
+    whereToSave[i] = dmacPeriod;
+
+    TC3->COUNT16.CTRLA.bit.ENABLE=0;               // Disable TC3
+    while (TC3->COUNT16.STATUS.bit.SYNCBUSY);       // Wait for synchronization
+
+    REG_TC3_CTRLA |= TC_CTRLA_PRESCSYNC_RESYNC |    // Reload or reset the counter on next generic clock. Reset the prescaler counter
+                   TC_CTRLA_ENABLE;               // Enable TC3
+    while (TC3->COUNT16.STATUS.bit.SYNCBUSY);  
+
+    //changeMuxInput()
+  }
+}
+
 void loop()
 {
-  Serial.print(dmacPeriod);                      // Output the results
-  Serial.print(F("   "));
-  Serial.println(dmacPulsewidth);
+  Serial.println(48000000.0/dmacPeriod);                      // Output the results
   delay(100);
 }
