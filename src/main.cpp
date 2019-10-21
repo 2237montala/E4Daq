@@ -10,9 +10,9 @@ uint16_t pulsewidth;
 uint32_t count;
 uint32_t divisor = 12000000;
 
-uint8_t muxA = 7;
-uint8_t muxB = 9;
-uint8_t muxEnable = 10;
+uint8_t muxA = 9;
+uint8_t muxB = 7;
+
 
 const uint8_t numSensors = 4;
 uint8_t currChannel = 0;
@@ -35,6 +35,7 @@ void setup()
 {
   Serial.begin(115200);                  // Send data back on the Zero's native port
   while(!Serial);                        // Wait for the Serial port to be ready
+  Serial.println("Setting up");
 
   REG_PM_APBCMASK |= PM_APBCMASK_EVSYS;     // Switch on the event system peripheral
  
@@ -82,7 +83,7 @@ void setup()
                     TCC_CTRLA_CPTEN0 |              // Enable capture on CC0
                     TCC_CTRLA_PRESCALER_DIV4 |      // Set prescaler to 1, 48MHz/1 = 48MHz
                     TCC_CTRLA_ENABLE;               // Enable TCC0
-  while (TCC0->SYNCBUSY.bit.ENABLE);                // Wait for synchronization
+  while (TCC0->SYNCBUSY.bit.ENABLE);                // Wait for synchronization               // Wait for synchronization
 
   pinMode(muxA,OUTPUT);
   pinMode(muxB,OUTPUT);
@@ -115,7 +116,7 @@ void loop()
   {
     scanAllChannels();
   }
-  Serial.println("Fuck this shit");
+  //Serial.println("Fuck this shit");
 }
 
 void TCC0_Handler()                              // Interrupt Service Routine (ISR) for timer TCC0
@@ -152,7 +153,7 @@ void clearTimerVal()
   REG_TCC0_CTRLBSET = TCC_CTRLBSET_CMD_READSYNC;  // Trigger a read synchronization on the COUNT register
   while (TCC0->SYNCBUSY.bit.CTRLB);               // Wait for the CTRLB register write synchronization
   while (TCC0->SYNCBUSY.bit.COUNT);               // Wait for the COUNT register read sychronization
-  Serial.println(REG_TCC0_COUNT, HEX);            // Print the result
+  //Serial.println(REG_TCC0_COUNT, HEX);            // Print the result
   REG_TCC0_COUNT = 0x0;
   while(TCC0->SYNCBUSY.bit.COUNT);
 
@@ -188,38 +189,51 @@ void changeMuxInput(bool A, bool B)
 
 void scanAllChannels()
 {
-  int count = 0;
-  while(count < numSensors)
+  
+  //unsigned long scanTimeout = micros();
+  for(int i = 0; i < numSensors;i++)
   {
-    if(periodComplete)
+    bool nextChannel = false;
+    uint32_t scanTimeout = micros();
+    while(!nextChannel && micros()-scanTimeout<=5000)
     {
-      noInterrupts();                               // Read the new period and pulse-width
-      period = isrPeriod;                   
-      interrupts();
+      if(periodComplete)
+      {
+        noInterrupts();                               // Read the new period and pulse-width
+        period = isrPeriod;                   
+        interrupts();
 
-      //Save value in array
-      hzValsRec[count] = divisor/period;
+        //Save value in array
+        hzValsRec[i] = divisor/period;
 
-      //Move channels
-      count++;
-      //If channel is over the sensor number then reset it
-      if(count > numSensors){
-        //currChannel = 0;
-        scanComplete = true;
+        //Move channels
+        //Serial.println(count);
+        setMuxChannel(i+1);
+        delayMicroseconds(10);
+        
+        //Disable timer
+        //stopTimer();
+        clearTimerVal();
+        delayMicroseconds(10);
+        //startTimer();
+        periodComplete=false;
+        nextChannel = true;
       }
-      setMuxChannel(count);
-
-      
-      // //Disable timer
-      // stopTimer();
-
-      // //Clear timer count
-      // clearTimerVal();
-
-      // //Start timer 
-      // startTimer();
-      // delayMicroseconds(50);
-      periodComplete=false;
+      //scanTimeout = micros();
     }
+    if(nextChannel == false)
+    {
+      //There was no fast enought input frequency
+      hzValsRec[i] = 1;
+      //Serial.printf("Too slow");
+    }
+    setMuxChannel(0);
+    // else
+    // {
+    //   nextChannel = false;
+    // }
+    
+    //periodComplete=false;
   }
+  scanComplete = true;
 }
