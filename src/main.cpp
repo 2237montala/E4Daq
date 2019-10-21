@@ -149,14 +149,12 @@ void startTimer()
 
 void clearTimerVal()
 {
+  REG_TCC0_CTRLBSET = TCC_CTRLBSET_CMD_READSYNC;  // Trigger a read synchronization on the COUNT register
+  while (TCC0->SYNCBUSY.bit.CTRLB);               // Wait for the CTRLB register write synchronization
+  while (TCC0->SYNCBUSY.bit.COUNT);               // Wait for the COUNT register read sychronization
+  Serial.println(REG_TCC0_COUNT, HEX);            // Print the result
   REG_TCC0_COUNT = 0x0;
   while(TCC0->SYNCBUSY.bit.COUNT);
-  //REG_TCC0_CTRLA |= TCC_CTRLA_PRESCSYNC_PRESC;
-  //REG_TCC0_CC0 = 0x0;
-  //REG_TCC0_CC1 = 0x0;
-  //while(TCC0->SYNCBUSY.bit.CC0 && TCC0->SYNCBUSY.bit.CC1);
-  //while(TCC0->SYNCBUSY.);
-  //REG_TC3_CTRLA |= TC_CTRLA_PRESCSYNC_GCLK;    // Reload or reset the counter on next generic clock. Reset the prescaler counter
 
 }
 
