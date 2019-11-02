@@ -29,7 +29,7 @@ void setMuxChannel(int channel);
 void scanAllChannels();
 
 
-void callback(){}                               // Dummy callback function
+void callback(){}                               // Dummy thicc callback function
 
 void setup()
 {
