@@ -1,239 +1,638 @@
 #include <Arduino.h>
+#include <SPI.h>
+#include "SdFat.h"
+#include "FreeStack.h"
+#include "UserTypes.h"
+#include "main.h"
 
-// Setup TCC0 to capture pulse-width and period
-volatile boolean periodComplete;
-volatile uint16_t isrPeriod;
-volatile uint16_t isrPulsewidth;
-volatile uint32_t isrCount;
-uint16_t period;
-uint16_t pulsewidth;
-uint32_t count;
-uint32_t divisor = 12000000;
+//==============================================================================
+// Start of configuration constants.
+//==============================================================================
+// Abort run on an overrun.  Data before the overrun will be saved.
+#define ABORT_ON_OVERRUN 1
+//------------------------------------------------------------------------------
+//Interval between data records in microseconds.
+const uint32_t LOG_INTERVAL_USEC = 10000; //Number is in milliseconds
+//------------------------------------------------------------------------------
+// Set USE_SHARED_SPI non-zero for use of an SPI sensor.
+// May not work for some cards.
+#ifndef USE_SHARED_SPI
+#define USE_SHARED_SPI 0
+#endif  // USE_SHARED_SPI
+//------------------------------------------------------------------------------
+// Pin definitions.
+//
+// SD chip select pin.
+const uint8_t SD_CS_PIN = 5;
+//
+// Digital pin to indicate an error, set to -1 if not used.
+// The led blinks for fatal errors. The led goes on solid for
+// overrun errors and logging continues unless ABORT_ON_OVERRUN
+// is non-zero.
+#ifdef ERROR_LED_PIN
+#undef ERROR_LED_PIN
+#endif  // ERROR_LED_PIN
+const int8_t ERROR_LED_PIN = LED_BUILTIN;
+//------------------------------------------------------------------------------
+// File definitions.
+//
+// Maximum file size in blocks.
+// The program creates a contiguous file with FILE_BLOCK_COUNT 512 byte blocks.
+// This file is flash erased using special SD commands.  The file will be
+// truncated if logging is stopped early.
+const uint32_t FILE_BLOCK_COUNT = 256000;
+//
+// log file base name if not defined in UserTypes.h
+#ifndef FILE_BASE_NAME
+#define FILE_BASE_NAME "data"
+#endif  // FILE_BASE_NAME
+//------------------------------------------------------------------------------
+// Buffer definitions.
+//
+// The logger will use SdFat's buffer plus BUFFER_BLOCK_COUNT-1 additional
+// buffers.
+//
+#ifndef RAMEND
+// Assume ARM. Use total of ten 512 byte buffers.
+const uint8_t BUFFER_BLOCK_COUNT = 10;
+//
+#elif RAMEND < 0X8FF
+#error Too little SRAM
+//
+#elif RAMEND < 0X10FF
+// Use total of two 512 byte buffers.
+const uint8_t BUFFER_BLOCK_COUNT = 2;
+//
+#elif RAMEND < 0X20FF
+// Use total of four 512 byte buffers.
+const uint8_t BUFFER_BLOCK_COUNT = 4;
+//
+#else  // RAMEND
+// Use total of 12 512 byte buffers.
+const uint8_t BUFFER_BLOCK_COUNT = 12;
+#endif  // RAMEND
+//==============================================================================
+// End of configuration constants.
+//==============================================================================
+// Temporary log file.  Will be deleted if a reset or power failure occurs.
+#define TMP_FILE_NAME FILE_BASE_NAME "##.bin"
 
-uint8_t muxA = 9;
-uint8_t muxB = 7;
+// Size of file base name.
+const uint8_t BASE_NAME_SIZE = sizeof(FILE_BASE_NAME) - 1;
+const uint8_t FILE_NAME_DIM  = BASE_NAME_SIZE + 7;
+char binName[FILE_NAME_DIM] = FILE_BASE_NAME "00.bin";
 
+SdFat sd;
 
-const uint8_t numSensors = 4;
-uint8_t currChannel = 0;
-bool scanComplete = false;
-uint32_t hzValsRec[numSensors];
-uint32_t timeElapsed=0;
+SdBaseFile binFile;
 
+// Number of data records in a block.
+const uint16_t DATA_DIM = (512 - 4)/sizeof(data_t);
 
-void stopTimer();
-void startTimer();
-void clearTimerVal();
-void changeMuxInput(bool A, bool B);
-void setMuxChannel(int channel);
-void scanAllChannels();
+//Compute fill so block size is 512 bytes.  FILL_DIM may be zero.
+const uint16_t FILL_DIM = 512 - 4 - DATA_DIM*sizeof(data_t);
 
-
-void callback(){}                               // Dummy thicc callback function
-
-void setup()
-{
-  Serial.begin(115200);                  // Send data back on the Zero's native port
-  while(!Serial);                        // Wait for the Serial port to be ready
-  Serial.println("Setting up");
-
-  REG_PM_APBCMASK |= PM_APBCMASK_EVSYS;     // Switch on the event system peripheral
- 
-  REG_GCLK_GENDIV = GCLK_GENDIV_DIV(1) |    // Divide the 48MHz system clock by 1 = 48MHz
-                    GCLK_GENDIV_ID(5);      // Set division on Generic Clock Generator (GCLK) 5
-  while (GCLK->STATUS.bit.SYNCBUSY);        // Wait for synchronization
-
-  REG_GCLK_GENCTRL = GCLK_GENCTRL_IDC |           // Set the duty cycle to 50/50 HIGH/LOW
-                     GCLK_GENCTRL_GENEN |         // Enable GCLK 5
-                     GCLK_GENCTRL_SRC_DFLL48M |   // Set the clock source to 48MHz
-                     GCLK_GENCTRL_ID(5);          // Set clock source on GCLK 5
-  while (GCLK->STATUS.bit.SYNCBUSY);              // Wait for synchronization*/
-
-  REG_GCLK_CLKCTRL = GCLK_CLKCTRL_CLKEN |         // Enable the generic clock...
-                     GCLK_CLKCTRL_GEN_GCLK5 |     // ....on GCLK5
-                     GCLK_CLKCTRL_ID_TCC0_TCC1;   // Feed the GCLK5 to TCC0 and TCC1
-  while (GCLK->STATUS.bit.SYNCBUSY);              // Wait for synchronization
-
-  REG_EIC_EVCTRL |= EIC_EVCTRL_EXTINTEO3;                                     // Enable event output on external interrupt 3
-  attachInterrupt(12, callback, HIGH);                                        // Attach interrupts to digital pin 12 (external interrupt 3)
- 
-  REG_EVSYS_USER = EVSYS_USER_CHANNEL(1) |                                // Attach the event user (receiver) to channel 0 (n + 1)
-                   EVSYS_USER_USER(EVSYS_ID_USER_TCC0_EV_1);              // Set the event user (receiver) as timer TCC0, event 1
-
-  REG_EVSYS_CHANNEL = EVSYS_CHANNEL_EDGSEL_NO_EVT_OUTPUT |                // No event edge detection
-                      EVSYS_CHANNEL_PATH_ASYNCHRONOUS |                   // Set event path as asynchronous
-                      EVSYS_CHANNEL_EVGEN(EVSYS_ID_GEN_EIC_EXTINT_3) |    // Set event generator (sender) as external interrupt 3
-                      EVSYS_CHANNEL_CHANNEL(0);                           // Attach the generator (sender) to channel 0
-
-  REG_TCC0_EVCTRL |= TCC_EVCTRL_MCEI1 |           // Enable the match or capture channel 1 event input
-                     TCC_EVCTRL_MCEI0 |           //.Enable the match or capture channel 0 event input
-                     TCC_EVCTRL_TCEI1 |           // Enable the TCC event 1 input
-                     /*TCC_EVCTRL_TCINV1 |*/      // Invert the event 1 input         
-                     TCC_EVCTRL_EVACT1_PPW;       // Set up the timer for capture: CC0 period, CC1 pulsewidth
-                                       
-  //NVIC_DisableIRQ(TCC0_IRQn);
-  //NVIC_ClearPendingIRQ(TCC0_IRQn);
-  NVIC_SetPriority(TCC0_IRQn, 0);      // Set the Nested Vector Interrupt Controller (NVIC) priority for TCC0 to 0 (highest)
-  NVIC_EnableIRQ(TCC0_IRQn);           // Connect the TCC0 timer to the Nested Vector Interrupt Controller (NVIC)
- 
-  REG_TCC0_INTENSET = TCC_INTENSET_MC1 |            // Enable compare channel 1 (CC1) interrupts
-                      TCC_INTENSET_MC0;             // Enable compare channel 0 (CC0) interrupts
- 
-  REG_TCC0_CTRLA |= TCC_CTRLA_CPTEN1 |              // Enable capture on CC1
-                    TCC_CTRLA_CPTEN0 |              // Enable capture on CC0
-                    TCC_CTRLA_PRESCALER_DIV4 |      // Set prescaler to 1, 48MHz/1 = 48MHz
-                    TCC_CTRLA_ENABLE;               // Enable TCC0
-  while (TCC0->SYNCBUSY.bit.ENABLE);                // Wait for synchronization               // Wait for synchronization
-
-  pinMode(muxA,OUTPUT);
-  pinMode(muxB,OUTPUT);
-  setMuxChannel(0);
-
-  Serial.println("Starting");
-}
-
-void loop()
-{
-  if (scanComplete && millis()-timeElapsed>=200)                             // Check if the period is complete
-  {
-    timeElapsed=millis();
-
-    //Stop timer
-    //stopTimer();
-
-    for(int i = 0; i < numSensors;i++)
-    {
-      Serial.print(hzValsRec[i]);                      // Output the results
-      Serial.print("   ");
+struct block_t {
+  uint16_t count;
+  uint16_t overrun;
+  data_t data[DATA_DIM];
+  uint8_t fill[FILL_DIM];
+};
+//==============================================================================
+// Error messages stored in flash.
+#define error(msg) {sd.errorPrint(&Serial, F(msg));fatalBlink();}
+//------------------------------------------------------------------------------
+//
+void fatalBlink() {
+  while (true) {
+    SysCall::yield();
+    if (ERROR_LED_PIN >= 0) {
+      digitalWrite(ERROR_LED_PIN, HIGH);
+      delay(200);
+      digitalWrite(ERROR_LED_PIN, LOW);
+      delay(200);
     }
+  }
+}
+//------------------------------------------------------------------------------
+// read data file and check for overruns
+void checkOverrun() {
+  bool headerPrinted = false;
+  block_t block;
+  uint32_t bn = 0;
+
+  if (!binFile.isOpen()) {
     Serial.println();
-    scanComplete=false;
-
-    //Start timer
-    //startTimer();
+    Serial.println(F("No current binary file"));
+    return;
   }
-  else
-  {
-    scanAllChannels();
-  }
-  //Serial.println("Fuck this shit");
-}
-
-void TCC0_Handler()                              // Interrupt Service Routine (ISR) for timer TCC0
-{     
-  // Check for match counter 0 (MC0) interrupt
-  if (TCC0->INTFLAG.bit.MC0)             
-  {   
-    isrPeriod = REG_TCC0_CC0;                   // Copy the period
-    periodComplete = true;                       // Indicate that the period is complete
-  }
-
-  // Check for match counter 1 (MC1) interrupt
-  if (TCC0->INTFLAG.bit.MC1)           
-  {
-    isrPulsewidth = REG_TCC0_CC1;               // Copy the pulse-width
-    isrCount++;
-  }
-}
-
-void stopTimer()
-{
-  REG_TCC0_CTRLBSET = TCC_CTRLBSET_CMD_STOP;
-  while(TCC0->SYNCBUSY.bit.CTRLB);
-}
-
-void startTimer()
-{
-  REG_TCC0_CTRLBSET = TCC_CTRLBSET_CMD_RETRIGGER;
-  while(TCC0->SYNCBUSY.bit.CTRLB);
-}
-
-void clearTimerVal()
-{
-  REG_TCC0_CTRLBSET = TCC_CTRLBSET_CMD_READSYNC;  // Trigger a read synchronization on the COUNT register
-  while (TCC0->SYNCBUSY.bit.CTRLB);               // Wait for the CTRLB register write synchronization
-  while (TCC0->SYNCBUSY.bit.COUNT);               // Wait for the COUNT register read sychronization
-  //Serial.println(REG_TCC0_COUNT, HEX);            // Print the result
-  REG_TCC0_COUNT = 0x0;
-  while(TCC0->SYNCBUSY.bit.COUNT);
-
-}
-
-void setMuxChannel(int channel)
-{
-  switch (channel)
-  {
-  case 0:
-    changeMuxInput(false,false);
-    break;
-  
-  case 1:
-    changeMuxInput(false,true);
-    break;
-
-  case 2:
-    changeMuxInput(true,false);
-    break;
-
-  case 3:
-    changeMuxInput(true,true);
-    break;
-  }
-}
-
-void changeMuxInput(bool A, bool B)
-{
-  digitalWrite(muxA,A);
-  digitalWrite(muxB,B);
-}
-
-void scanAllChannels()
-{
-  
-  //unsigned long scanTimeout = micros();
-  for(int i = 0; i < numSensors;i++)
-  {
-    bool nextChannel = false;
-    uint32_t scanTimeout = micros();
-    while(!nextChannel && micros()-scanTimeout<=5000)
-    {
-      if(periodComplete)
-      {
-        noInterrupts();                               // Read the new period and pulse-width
-        period = isrPeriod;                   
-        interrupts();
-
-        //Save value in array
-        hzValsRec[i] = divisor/period;
-
-        //Move channels
-        //Serial.println(count);
-        setMuxChannel(i+1);
-        delayMicroseconds(10);
-        
-        //Disable timer
-        //stopTimer();
-        clearTimerVal();
-        delayMicroseconds(10);
-        //startTimer();
-        periodComplete=false;
-        nextChannel = true;
+  binFile.rewind();
+  Serial.println();
+  Serial.print(F("FreeStack: "));
+  Serial.println(FreeStack());
+  Serial.println(F("Checking overrun errors - type any character to stop"));
+  while (binFile.read(&block, 512) == 512) {
+    if (block.count == 0) {
+      break;
+    }
+    if (block.overrun) {
+      if (!headerPrinted) {
+        Serial.println();
+        Serial.println(F("Overruns:"));
+        Serial.println(F("fileBlockNumber,sdBlockNumber,overrunCount"));
+        headerPrinted = true;
       }
-      //scanTimeout = micros();
+      Serial.print(bn);
+      Serial.print(',');
+      Serial.print(binFile.firstBlock() + bn);
+      Serial.print(',');
+      Serial.println(block.overrun);
     }
-    if(nextChannel == false)
-    {
-      //There was no fast enought input frequency
-      hzValsRec[i] = 1;
-      //Serial.printf("Too slow");
-    }
-    setMuxChannel(0);
-    // else
-    // {
-    //   nextChannel = false;
-    // }
-    
-    //periodComplete=false;
+    bn++;
   }
-  scanComplete = true;
+  if (!headerPrinted) {
+    Serial.println(F("No errors found"));
+  } else {
+    Serial.println(F("Done"));
+  }
+}
+//-----------------------------------------------------------------------------
+// Convert binary file to csv file.
+void binaryToCsv() {
+  uint8_t lastPct = 0;
+  block_t block;
+  uint32_t t0 = millis();
+  uint32_t syncCluster = 0;
+  SdFile csvFile;
+  char csvName[FILE_NAME_DIM];
+
+  if (!binFile.isOpen()) {
+    Serial.println();
+    Serial.println(F("No current binary file"));
+    return;
+  }
+  Serial.println();
+  Serial.print(F("FreeStack: "));
+  Serial.println(FreeStack());
+
+  // Create a new csvFile.
+  strcpy(csvName, binName);
+  strcpy(&csvName[BASE_NAME_SIZE + 3], "csv");
+
+  if (!csvFile.open(csvName, O_WRONLY | O_CREAT | O_TRUNC)) {
+    error("open csvFile failed");
+  }
+  binFile.rewind();
+  Serial.print(F("Writing: "));
+  Serial.print(csvName);
+  Serial.println(F(" - type any character to stop"));
+  printHeader(&csvFile);
+  uint32_t tPct = millis();
+  while (!Serial.available() && binFile.read(&block, 512) == 512) {
+    uint16_t i;
+    if (block.count == 0 || block.count > DATA_DIM) {
+      break;
+    }
+    if (block.overrun) {
+      csvFile.print(F("OVERRUN,"));
+      csvFile.println(block.overrun);
+    }
+    for (i = 0; i < block.count; i++) {
+      printData(&csvFile, &block.data[i]);
+    }
+    if (csvFile.curCluster() != syncCluster) {
+      csvFile.sync();
+      syncCluster = csvFile.curCluster();
+    }
+    if ((millis() - tPct) > 1000) {
+      uint8_t pct = binFile.curPosition()/(binFile.fileSize()/100);
+      if (pct != lastPct) {
+        tPct = millis();
+        lastPct = pct;
+        Serial.print(pct, DEC);
+        Serial.println('%');
+      }
+    }
+    if (Serial.available()) {
+      break;
+    }
+  }
+  csvFile.close();
+  Serial.print(F("Done: "));
+  Serial.print(0.001*(millis() - t0));
+  Serial.println(F(" Seconds"));
+}
+//-----------------------------------------------------------------------------
+void createBinFile() {
+  // max number of blocks to erase per erase call
+  const uint32_t ERASE_SIZE = 262144L;
+  uint32_t bgnBlock, endBlock;
+
+  // Delete old tmp file.
+  if (sd.exists(TMP_FILE_NAME)) {
+    Serial.println(F("Deleting tmp file " TMP_FILE_NAME));
+    if (!sd.remove(TMP_FILE_NAME)) {
+      error("Can't remove tmp file");
+    }
+  }
+  // Create new file.
+  Serial.println(F("\nCreating new file"));
+  binFile.close();
+  if (!binFile.createContiguous(TMP_FILE_NAME, 512 * FILE_BLOCK_COUNT)) {
+    error("createContiguous failed");
+  }
+  // Get the address of the file on the SD.
+  if (!binFile.contiguousRange(&bgnBlock, &endBlock)) {
+    error("contiguousRange failed");
+  }
+  // Flash erase all data in the file.
+  Serial.println(F("Erasing all data"));
+  uint32_t bgnErase = bgnBlock;
+  uint32_t endErase;
+  while (bgnErase < endBlock) {
+    endErase = bgnErase + ERASE_SIZE;
+    if (endErase > endBlock) {
+      endErase = endBlock;
+    }
+    if (!sd.card()->erase(bgnErase, endErase)) {
+      error("erase failed");
+    }
+    bgnErase = endErase + 1;
+  }
+}
+//------------------------------------------------------------------------------
+// dump data file to Serial
+void dumpData() {
+  block_t block;
+  if (!binFile.isOpen()) {
+    Serial.println();
+    Serial.println(F("No current binary file"));
+    return;
+  }
+  binFile.rewind();
+  Serial.println();
+  Serial.println(F("Type any character to stop"));
+  delay(1000);
+  printHeader(&Serial);
+  while (!Serial.available() && binFile.read(&block , 512) == 512) {
+    if (block.count == 0) {
+      break;
+    }
+    if (block.overrun) {
+      Serial.print(F("OVERRUN,"));
+      Serial.println(block.overrun);
+    }
+    for (uint16_t i = 0; i < block.count; i++) {
+      printData(&Serial, &block.data[i]);
+    }
+  }
+  Serial.println(F("Done"));
+}
+//------------------------------------------------------------------------------
+// log data
+void logData() {
+  createBinFile();
+  recordBinFile();
+  renameBinFile();
+}
+//------------------------------------------------------------------------------
+void openBinFile() {
+  char name[FILE_NAME_DIM];
+  strcpy(name, binName);
+  Serial.println(F("\nEnter two digit version"));
+  Serial.println(name);
+  //Serial.write(name, static_cast(char)(BASE_NAME_SIZE));
+  for (int i = 0; i < 2; i++) {
+    while (!Serial.available()) {
+     SysCall::yield();
+    }
+    char c = Serial.read();
+    Serial.write(c);
+    if (c < '0' || c > '9') {
+      Serial.println(F("\nInvalid digit"));
+      return;
+    }
+    name[BASE_NAME_SIZE + i] = c;
+  }
+  Serial.println(&name[BASE_NAME_SIZE+2]);
+  if (!sd.exists(name)) {
+    Serial.println(F("File does not exist"));
+    return;
+  }
+  binFile.close();
+  strcpy(binName, name);
+  if (!binFile.open(binName, O_RDONLY)) {
+    Serial.println(F("open failed"));
+    return;
+  }
+  Serial.println(F("File opened"));
+}
+//------------------------------------------------------------------------------
+void recordBinFile() {
+  const uint8_t QUEUE_DIM = BUFFER_BLOCK_COUNT + 1;
+  // Index of last queue location.
+  const uint8_t QUEUE_LAST = QUEUE_DIM - 1;
+
+  // Allocate extra buffer space.
+  block_t block[BUFFER_BLOCK_COUNT - 1];
+
+  block_t* curBlock = 0;
+
+  block_t* emptyStack[BUFFER_BLOCK_COUNT];
+  uint8_t emptyTop;
+  uint8_t minTop;
+
+  block_t* fullQueue[QUEUE_DIM];
+  uint8_t fullHead = 0;
+  uint8_t fullTail = 0;
+
+  // Use SdFat's internal buffer.
+  emptyStack[0] = (block_t*)sd.vol()->cacheClear();
+  if (emptyStack[0] == 0) {
+    error("cacheClear failed");
+  }
+  // Put rest of buffers on the empty stack.
+  for (int i = 1; i < BUFFER_BLOCK_COUNT; i++) {
+    emptyStack[i] = &block[i - 1];
+  }
+  emptyTop = BUFFER_BLOCK_COUNT;
+  minTop = BUFFER_BLOCK_COUNT;
+
+  // Start a multiple block write.
+  if (!sd.card()->writeStart(binFile.firstBlock())) {
+    error("writeStart failed");
+  }
+  Serial.print(F("FreeStack: "));
+  Serial.println(FreeStack());
+  Serial.println(F("Logging - type any character to stop"));
+  bool closeFile = false;
+  uint32_t bn = 0;
+  uint32_t maxLatency = 0;
+  uint32_t overrun = 0;
+  uint32_t overrunTotal = 0;
+  uint32_t logTime = micros();
+  while(1) {
+     // Time for next data record.
+    logTime += LOG_INTERVAL_USEC;
+    if (Serial.available()) {
+      closeFile = true;
+    }
+    if (closeFile) {
+      if (curBlock != 0) {
+        // Put buffer in full queue.
+        fullQueue[fullHead] = curBlock;
+        fullHead = fullHead < QUEUE_LAST ? fullHead + 1 : 0;
+        curBlock = 0;
+      }
+    } else {
+      if (curBlock == 0 && emptyTop != 0) {
+        curBlock = emptyStack[--emptyTop];
+        if (emptyTop < minTop) {
+          minTop = emptyTop;
+        }
+        curBlock->count = 0;
+        curBlock->overrun = overrun;
+        overrun = 0;
+      }
+      if ((int32_t)(logTime - micros()) < 0) {
+        error("Rate too fast");
+      }
+      int32_t delta;
+      do {
+        delta = micros() - logTime;
+      } while (delta < 0);
+      if (curBlock == 0) {
+        overrun++;
+        overrunTotal++;
+        if (ERROR_LED_PIN >= 0) {
+          digitalWrite(ERROR_LED_PIN, HIGH);
+        }
+#if ABORT_ON_OVERRUN
+        Serial.println(F("Overrun abort"));
+        break;
+ #endif  // ABORT_ON_OVERRUN
+      } else {
+#if USE_SHARED_SPI
+        sd.card()->spiStop();
+#endif  // USE_SHARED_SPI
+        acquireData(&curBlock->data[curBlock->count++]);
+#if USE_SHARED_SPI
+        sd.card()->spiStart();
+#endif  // USE_SHARED_SPI
+        if (curBlock->count == DATA_DIM) {
+          fullQueue[fullHead] = curBlock;
+          fullHead = fullHead < QUEUE_LAST ? fullHead + 1 : 0;
+          curBlock = 0;
+        }
+      }
+    }
+    if (fullHead == fullTail) {
+      // Exit loop if done.
+      if (closeFile) {
+        break;
+      }
+    } else if (!sd.card()->isBusy()) {
+      // Get address of block to write.
+      block_t* pBlock = fullQueue[fullTail];
+      fullTail = fullTail < QUEUE_LAST ? fullTail + 1 : 0;
+      // Write block to SD.
+      uint32_t usec = micros();
+      if (!sd.card()->writeData((uint8_t*)pBlock)) {
+        error("write data failed");
+      }
+      usec = micros() - usec;
+      if (usec > maxLatency) {
+        maxLatency = usec;
+      }
+      // Move block to empty queue.
+      emptyStack[emptyTop++] = pBlock;
+      bn++;
+      if (bn == FILE_BLOCK_COUNT) {
+        // File full so stop
+        break;
+      }
+    }
+  }
+  if (!sd.card()->writeStop()) {
+    error("writeStop failed");
+  }
+  Serial.print(F("Min Free buffers: "));
+  Serial.println(minTop);
+  Serial.print(F("Max block write usec: "));
+  Serial.println(maxLatency);
+  Serial.print(F("Overruns: "));
+  Serial.println(overrunTotal);
+  // Truncate file if recording stopped early.
+  if (bn != FILE_BLOCK_COUNT) {
+    Serial.println(F("Truncating file"));
+    if (!binFile.truncate(512L * bn)) {
+      error("Can't truncate file");
+    }
+  }
+}
+//------------------------------------------------------------------------------
+void recoverTmpFile() {
+  uint16_t count;
+  if (!binFile.open(TMP_FILE_NAME, O_RDWR)) {
+    return;
+  }
+  if (binFile.read(&count, 2) != 2 || count != DATA_DIM) {
+    error("Please delete existing " TMP_FILE_NAME);
+  }
+  Serial.println(F("\nRecovering data in tmp file " TMP_FILE_NAME));
+  uint32_t bgnBlock = 0;
+  uint32_t endBlock = binFile.fileSize()/512 - 1;
+  // find last used block.
+  while (bgnBlock < endBlock) {
+    uint32_t midBlock = (bgnBlock + endBlock + 1)/2;
+    binFile.seekSet(512*midBlock);
+    if (binFile.read(&count, 2) != 2) error("read");
+    if (count == 0 || count > DATA_DIM) {
+      endBlock = midBlock - 1;
+    } else {
+      bgnBlock = midBlock;
+    }
+  }
+  // truncate after last used block.
+  if (!binFile.truncate(512*(bgnBlock + 1))) {
+    error("Truncate " TMP_FILE_NAME " failed");
+  }
+  renameBinFile();
+}
+//-----------------------------------------------------------------------------
+void renameBinFile() {
+  while (sd.exists(binName)) {
+    if (binName[BASE_NAME_SIZE + 1] != '9') {
+      binName[BASE_NAME_SIZE + 1]++;
+    } else {
+      binName[BASE_NAME_SIZE + 1] = '0';
+      if (binName[BASE_NAME_SIZE] == '9') {
+        error("Can't create file name");
+      }
+      binName[BASE_NAME_SIZE]++;
+    }
+  }
+  if (!binFile.rename(binName)) {
+    error("Can't rename file");
+    }
+  Serial.print(F("File renamed: "));
+  Serial.println(binName);
+  Serial.print(F("File size: "));
+  Serial.print(binFile.fileSize()/512);
+  Serial.println(F(" blocks"));
+}
+//------------------------------------------------------------------------------
+void testSensor() {
+  const uint32_t interval = 200000;
+  int32_t diff;
+  data_t data;
+  Serial.println(F("\nTesting - type any character to stop\n"));
+  // Wait for Serial Idle.
+  delay(1000);
+  printHeader(&Serial);
+  uint32_t m = micros();
+  while (!Serial.available()) {
+    m += interval;
+    do {
+      diff = m - micros();
+    } while (diff > 0);
+    acquireData(&data);
+    printData(&Serial, &data);
+  }
+}
+//------------------------------------------------------------------------------
+void setup(void) {
+  if (ERROR_LED_PIN >= 0) {
+    pinMode(ERROR_LED_PIN, OUTPUT);
+  }
+  Serial.begin(115200);
+
+  // Wait for USB Serial
+  while (!Serial) {
+    SysCall::yield();
+  }
+  Serial.print(F("\nFreeStack: "));
+  Serial.println(FreeStack());
+  Serial.print(F("Records/block: "));
+  Serial.println(DATA_DIM);
+  if (sizeof(block_t) != 512) {
+    error("Invalid block size");
+  }
+  // Allow userSetup access to SPI bus.
+  pinMode(SD_CS_PIN, OUTPUT);
+  digitalWrite(SD_CS_PIN, HIGH);
+
+  // Setup sensors.
+  userSetup();
+
+  // Initialize at the highest speed supported by the board that is
+  // not over 50 MHz. Try a lower speed if SPI errors occur.
+  if (!sd.begin(SD_CS_PIN, SD_SCK_MHZ(5))) {
+    sd.initErrorPrint(&Serial);
+    fatalBlink();
+  }
+  // recover existing tmp file.
+  if (sd.exists(TMP_FILE_NAME)) {
+    Serial.println(F("\nType 'Y' to recover existing tmp file " TMP_FILE_NAME));
+    while (!Serial.available()) {
+      SysCall::yield();
+    }
+    if (Serial.read() == 'Y') {
+      recoverTmpFile();
+    } else {
+      error("'Y' not typed, please manually delete " TMP_FILE_NAME);
+    }
+  }
+}
+//------------------------------------------------------------------------------
+void loop(void) {
+  // Read any Serial data.
+  do {
+    delay(10);
+  } while (Serial.available() && Serial.read() >= 0);
+  Serial.println();
+  Serial.println(F("type:"));
+  Serial.println(F("b - open existing bin file"));
+  Serial.println(F("c - convert file to csv"));
+  Serial.println(F("d - dump data to Serial"));
+  Serial.println(F("e - overrun error details"));
+  Serial.println(F("l - list files"));
+  Serial.println(F("r - record data"));
+  Serial.println(F("t - test without logging"));
+  while(!Serial.available()) {
+    SysCall::yield();
+  }
+#if WDT_YIELD_TIME_MICROS
+  Serial.println(F("LowLatencyLogger can not run with watchdog timer"));
+  SysCall::halt();
+#endif
+
+  char c = tolower(Serial.read());
+
+  // Discard extra Serial data.
+  do {
+    delay(10);
+  } while (Serial.available() && Serial.read() >= 0);
+
+  if (ERROR_LED_PIN >= 0) {
+    digitalWrite(ERROR_LED_PIN, LOW);
+  }
+  if (c == 'b') {
+    openBinFile();
+  } else if (c == 'c') {
+    binaryToCsv();
+  } else if (c == 'd') {
+    dumpData();
+  } else if (c == 'e') {
+    checkOverrun();
+  } else if (c == 'l') {
+    Serial.println(F("\nls:"));
+    sd.ls(&Serial, LS_SIZE);
+  } else if (c == 'r') {
+    logData();
+  } else if (c == 't') {
+    testSensor();
+  } else {
+    Serial.println(F("Invalid entry"));
+  }
 }
