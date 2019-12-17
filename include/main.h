@@ -4,5 +4,6 @@
 void createBinFile();
 void recordBinFile();
 void renameBinFile();
+void startRecording();
 
 #endif

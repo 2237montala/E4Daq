@@ -5,6 +5,12 @@
 #include "UserTypes.h"
 #include "main.h"
 
+//Anthony's variables
+// Record switch pin
+const uint8_t recordSwitch = 4;
+boolean recording = false;
+
+
 //==============================================================================
 // Start of configuration constants.
 //==============================================================================
@@ -24,8 +30,7 @@ const uint32_t LOG_INTERVAL_USEC = 10000; //Number is in milliseconds
 //
 // SD chip select pin.
 const uint8_t SD_CS_PIN = 5;
-// Record switch pin
-const uint8_t recordSwitch = 4;
+
 //
 // Digital pin to indicate an error, set to -1 if not used.
 // The led blinks for fatal errors. The led goes on solid for
@@ -182,10 +187,6 @@ void binaryToCsv() {
       moreFiles = false;
       return;
     }
-
-    Serial.println();
-    Serial.print(F("FreeStack: "));
-    Serial.println(FreeStack());
 
     // Create a new csvFile.
     strcpy(csvName, name);
@@ -389,7 +390,7 @@ void recordBinFile() {
   while(1) {
      // Time for next data record.
     logTime += LOG_INTERVAL_USEC;
-    if (Serial.available()) {
+    if (Serial.available() || !digitalRead(recordSwitch)) {
       closeFile = true;
     }
     if (closeFile) {
@@ -606,10 +607,11 @@ void setup(void) {
   }
 
   pinMode(recordSwitch,INPUT_PULLDOWN);
+  attachInterrupt(recordSwitch,startRecording,HIGH);
 }
 //------------------------------------------------------------------------------
 void loop(void) {
-  // Read any Serial data.
+  //Read any Serial data.
   do {
     delay(10);
   } while (Serial.available() && Serial.read() >= 0);
@@ -622,7 +624,10 @@ void loop(void) {
   Serial.println(F("l - list files"));
   Serial.println(F("r - record data"));
   Serial.println(F("t - test without logging"));
-  while(!Serial.available()) {
+
+  while(!Serial.available() && !recording)
+  {
+    //Do things
     SysCall::yield();
   }
 
@@ -647,11 +652,24 @@ void loop(void) {
   } else if (c == 'l') {
     Serial.println(F("\nls:"));
     sd.ls(&Serial, LS_SIZE);
-  } else if (c == 'r' && digitalRead(recordSwitch)) {
+  } else if (c == 'r') {
     logData();
   } else if (c == 't') {
     testSensor();
   } else {
     Serial.println(F("Invalid entry"));
   }
+  if(recording)
+  {
+    detachInterrupt(recordSwitch);
+    recording=false;
+    logData();
+    delay(500);
+    attachInterrupt(recordSwitch,startRecording,HIGH);
+  }
+}
+
+void startRecording()
+{
+  recording = true;
 }
