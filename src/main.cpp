@@ -18,7 +18,7 @@ boolean recording = false;
 #define ABORT_ON_OVERRUN 1
 //------------------------------------------------------------------------------
 //Interval between data records in microseconds.
-const uint32_t LOG_INTERVAL_USEC = 10000; //Number is in milliseconds
+const uint32_t LOG_INTERVAL_USEC = 3600; //Number is in milliseconds
 //------------------------------------------------------------------------------
 // Set USE_SHARED_SPI non-zero for use of an SPI sensor.
 // May not work for some cards.
