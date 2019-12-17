@@ -60,7 +60,7 @@ void printHeader(Print* pr) {
 }
 
 // Sensor setup
-void userSetup()
+boolean userSetup()
 {
   boolean accelConnected = accel.begin(0x18);
   delay(10);
@@ -70,9 +70,11 @@ void userSetup()
   delay(10);
 
   //Check if all sensors are responding
+  boolean allSensorsConn = true;
   if(!accelConnected)
   {
     Serial.println("Accelerameter not connected");
+    allSensorsConn = false;
   }
 
   for(int i = 0; i < RPM_DIM; i++)
@@ -82,9 +84,10 @@ void userSetup()
       Serial.print("Sensor ");
       Serial.print(i);
       Serial.println(" isn't responding");
+      allSensorsConn = false;
     }
   }
-
+  return allSensorsConn;
 }
 
 uint16_t getRPMSensorData(uint8_t address)

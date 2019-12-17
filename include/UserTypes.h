@@ -13,6 +13,6 @@ struct data_t {
 void acquireData(data_t* data);
 void printData(Print* pr, data_t* data);
 void printHeader(Print* pr);
-void userSetup();
+boolean userSetup();
 uint16_t getRPMSensorData(uint8_t address);
 #endif  // UserTypes_h

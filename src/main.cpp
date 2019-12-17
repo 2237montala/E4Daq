@@ -5,12 +5,6 @@
 #include "UserTypes.h"
 #include "main.h"
 
-//Anthony's variables
-// Record switch pin
-const uint8_t recordSwitch = 4;
-boolean recording = false;
-
-
 //==============================================================================
 // Start of configuration constants.
 //==============================================================================
@@ -30,7 +24,6 @@ const uint32_t LOG_INTERVAL_USEC = 3600; //Number is in milliseconds
 //
 // SD chip select pin.
 const uint8_t SD_CS_PIN = 5;
-
 //
 // Digital pin to indicate an error, set to -1 if not used.
 // The led blinks for fatal errors. The led goes on solid for
@@ -59,25 +52,7 @@ const uint32_t FILE_BLOCK_COUNT = 256000;
 // The logger will use SdFat's buffer plus BUFFER_BLOCK_COUNT-1 additional
 // buffers.
 //
-#ifndef RAMEND
-// Assume ARM. Use total of ten 512 byte buffers.
 const uint8_t BUFFER_BLOCK_COUNT = 10;
-//
-#elif RAMEND < 0X8FF
-#error Too little SRAM
-//
-#elif RAMEND < 0X10FF
-// Use total of two 512 byte buffers.
-const uint8_t BUFFER_BLOCK_COUNT = 2;
-//
-#elif RAMEND < 0X20FF
-// Use total of four 512 byte buffers.
-const uint8_t BUFFER_BLOCK_COUNT = 4;
-//
-#else  // RAMEND
-// Use total of 12 512 byte buffers.
-const uint8_t BUFFER_BLOCK_COUNT = 12;
-#endif  // RAMEND
 //==============================================================================
 // End of configuration constants.
 //==============================================================================
@@ -107,8 +82,19 @@ struct block_t {
 //==============================================================================
 // Error messages stored in flash.
 #define error(msg) {sd.errorPrint(&Serial, F(msg));fatalBlink();}
-//------------------------------------------------------------------------------
-//
+
+//Anthony's variables
+const uint8_t recordSwitch = 4;
+boolean recording = false;
+boolean wifiTransfer = false;
+
+//Objects for the two threads the esp will run
+TaskHandle_t DisplayWebPage, RecordData;
+
+void startRecording() {
+  recording = true;
+}
+
 void fatalBlink() {
   while (true) {
     SysCall::yield();
@@ -121,49 +107,6 @@ void fatalBlink() {
   }
 }
 //------------------------------------------------------------------------------
-// read data file and check for overruns
-void checkOverrun() {
-  bool headerPrinted = false;
-  block_t block;
-  uint32_t bn = 0;
-
-  if (!binFile.isOpen()) {
-    Serial.println();
-    Serial.println(F("No current binary file"));
-    return;
-  }
-  binFile.rewind();
-  Serial.println();
-  Serial.print(F("FreeStack: "));
-  Serial.println(FreeStack());
-  Serial.println(F("Checking overrun errors - type any character to stop"));
-  while (binFile.read(&block, 512) == 512) {
-    if (block.count == 0) {
-      break;
-    }
-    if (block.overrun) {
-      if (!headerPrinted) {
-        Serial.println();
-        Serial.println(F("Overruns:"));
-        Serial.println(F("fileBlockNumber,sdBlockNumber,overrunCount"));
-        headerPrinted = true;
-      }
-      Serial.print(bn);
-      Serial.print(',');
-      Serial.print(binFile.firstBlock() + bn);
-      Serial.print(',');
-      Serial.println(block.overrun);
-    }
-    bn++;
-  }
-  if (!headerPrinted) {
-    Serial.println(F("No errors found"));
-  } else {
-    Serial.println(F("Done"));
-  }
-}
-//-----------------------------------------------------------------------------
-// Convert binary file to csv file.
 void binaryToCsv() {
   boolean moreFiles = true;
   uint8_t fileCounter = 0;
@@ -278,70 +221,10 @@ void createBinFile() {
   }
 }
 //------------------------------------------------------------------------------
-// dump data file to Serial
-void dumpData() {
-  block_t block;
-  if (!binFile.isOpen()) {
-    Serial.println();
-    Serial.println(F("No current binary file"));
-    return;
-  }
-  binFile.rewind();
-  Serial.println();
-  Serial.println(F("Type any character to stop"));
-  delay(1000);
-  printHeader(&Serial);
-  while (!Serial.available() && binFile.read(&block , 512) == 512) {
-    if (block.count == 0) {
-      break;
-    }
-    if (block.overrun) {
-      Serial.print(F("OVERRUN,"));
-      Serial.println(block.overrun);
-    }
-    for (uint16_t i = 0; i < block.count; i++) {
-      printData(&Serial, &block.data[i]);
-    }
-  }
-  Serial.println(F("Done"));
-}
-//------------------------------------------------------------------------------
-// log data
 void logData() {
   createBinFile();
   recordBinFile();
   renameBinFile();
-}
-//------------------------------------------------------------------------------
-void openBinFile() {
-  char name[FILE_NAME_DIM];
-  strcpy(name, binName);
-  Serial.println(F("\nEnter two digit version"));
-  Serial.println(name);
-  for (int i = 0; i < 2; i++) {
-    while (!Serial.available()) {
-     SysCall::yield();
-    }
-    char c = Serial.read();
-    Serial.write(c);
-    if (c < '0' || c > '9') {
-      Serial.println(F("\nInvalid digit"));
-      return;
-    }
-    name[BASE_NAME_SIZE + i] = c;
-  }
-  Serial.println(&name[BASE_NAME_SIZE+2]);
-  if (!sd.exists(name)) {
-    Serial.println(F("File does not exist"));
-    return;
-  }
-  binFile.close();
-  strcpy(binName, name);
-  if (!binFile.open(binName, O_RDONLY)) {
-    Serial.println(F("open failed"));
-    return;
-  }
-  Serial.println(F("File opened"));
 }
 //------------------------------------------------------------------------------
 void recordBinFile() {
@@ -428,13 +311,6 @@ void recordBinFile() {
           break;
   #endif  // ABORT_ON_OVERRUN
         } else {
-  #if USE_SHARED_SPI
-          sd.card()->spiStop();
-  #endif  // USE_SHARED_SPI
-          acquireData(&curBlock->data[curBlock->count++]);
-  #if USE_SHARED_SPI
-          sd.card()->spiStart();
-  #endif  // USE_SHARED_SPI
           if (curBlock->count == DATA_DIM) {
             fullQueue[fullHead] = curBlock;
             fullHead = fullHead < QUEUE_LAST ? fullHead + 1 : 0;
@@ -557,113 +433,117 @@ void testSensor() {
   }
 }
 //------------------------------------------------------------------------------
-void setup(void) {
-  if (ERROR_LED_PIN >= 0) {
-    pinMode(ERROR_LED_PIN, OUTPUT);
-  }
-  Serial.begin(115200);
 
-  // Wait for USB Serial
-  while (!Serial) {
-    SysCall::yield();
-  }
+void setup() {
+    if (ERROR_LED_PIN >= 0) {
+        pinMode(ERROR_LED_PIN, OUTPUT);
+    }
+    Serial.begin(115200);
 
-  // Allow userSetup access to SPI bus.
-  pinMode(SD_CS_PIN, OUTPUT);
-  digitalWrite(SD_CS_PIN, HIGH);
+    // Allow userSetup access to SPI bus.
+    pinMode(SD_CS_PIN, OUTPUT);
+    digitalWrite(SD_CS_PIN, HIGH);
 
-  // Setup sensors.
-  userSetup();
+    // Setup sensors.
+    if (!userSetup())
+    {
+        fatalBlink();
+    }
 
-  // Initialize at the highest speed supported by the board that is
-  // not over 50 MHz. Try a lower speed if SPI errors occur.
-  if (!sd.begin(SD_CS_PIN, SD_SCK_MHZ(5))) {
-    sd.initErrorPrint(&Serial);
-    fatalBlink();
-  }
-  // recover existing tmp file.
-  // if (sd.exists(TMP_FILE_NAME)) {
-  //   Serial.println(F("\nType 'Y' to recover existing tmp file " TMP_FILE_NAME));
-  //   while (!Serial.available()) {
-  //     SysCall::yield();
-  //   }
-  //   if (Serial.read() == 'Y') {
-  //     recoverTmpFile();
-  //   } else {
-  //     error("'Y' not typed, please manually delete " TMP_FILE_NAME);
-  //   }
-  // }
-  if(sd.exists(TMP_FILE_NAME))
-  {
-    //Always recover a file. It might be useful
-    recoverTmpFile();
-    delay(500);
-  }
+    // Initialize at the highest speed supported by the board that is
+    // not over 50 MHz. Try a lower speed if SPI errors occur.
+    if (!sd.begin(SD_CS_PIN, SD_SCK_MHZ(5))) {
+        sd.initErrorPrint(&Serial);
+        fatalBlink();
+    }
 
-  pinMode(recordSwitch,INPUT_PULLDOWN);
-  attachInterrupt(recordSwitch,startRecording,HIGH);
-}
-//------------------------------------------------------------------------------
-void loop(void) {
-  //Read any Serial data.
-  do {
-    delay(10);
-  } while (Serial.available() && Serial.read() >= 0);
-  Serial.println();
-  Serial.println(F("type:"));
-  Serial.println(F("b - open existing bin file"));
-  Serial.println(F("c - convert file to csv"));
-  Serial.println(F("d - dump data to Serial"));
-  Serial.println(F("e - overrun error details"));
-  Serial.println(F("l - list files"));
-  Serial.println(F("r - record data"));
-  Serial.println(F("t - test without logging"));
+    if(sd.exists(TMP_FILE_NAME))
+    {
+        //Always recover a file. It might be useful
+        recoverTmpFile();
+        delay(500);
+    }
 
-  while(!Serial.available() && !recording)
-  {
-    //Do things
-    SysCall::yield();
-  }
+    //Define recording switch as a interrupt 
+    pinMode(recordSwitch,INPUT_PULLDOWN);
+    //attachInterrupt(recordSwitch,startRecording,HIGH);
 
-  char c = tolower(Serial.read());
+    //Create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
+    xTaskCreatePinnedToCore(
+                        displayWebPageCode,   /* Task function. */
+                        "Webpage",     /* name of task. */
+                        10000,       /* Stack size of task */
+                        NULL,        /* parameter of the task */
+                        1,           /* priority of the task */
+                        &DisplayWebPage,      /* Task handle to keep track of created task */
+                        0);          /* pin task to core 0 */                  
+    delay(200); 
+    Serial.println("Webpage thread started");
 
-  // Discard extra Serial data.
-  do {
-    delay(10);
-  } while (Serial.available() && Serial.read() >= 0);
-
-  if (ERROR_LED_PIN >= 0) {
-    digitalWrite(ERROR_LED_PIN, LOW);
-  }
-  if (c == 'b') {
-    openBinFile();
-  } else if (c == 'c') {
-    binaryToCsv();
-  } else if (c == 'd') {
-    dumpData();
-  } else if (c == 'e') {
-    checkOverrun();
-  } else if (c == 'l') {
-    Serial.println(F("\nls:"));
-    sd.ls(&Serial, LS_SIZE);
-  } else if (c == 'r') {
-    logData();
-  } else if (c == 't') {
-    testSensor();
-  } else {
-    Serial.println(F("Invalid entry"));
-  }
-  if(recording)
-  {
-    detachInterrupt(recordSwitch);
-    recording=false;
-    logData();
-    delay(500);
-    attachInterrupt(recordSwitch,startRecording,HIGH);
-  }
+    //create a task that will be executed in the Task2code() function, with priority 1 and executed on core 1
+    xTaskCreatePinnedToCore(
+                        recordDataCode,   /* Task function. */
+                        "Record",     /* name of task. */
+                        10000,       /* Stack size of task */
+                        NULL,        /* parameter of the task */
+                        1,           /* priority of the task */
+                        &RecordData, /* Task handle to keep track of created task */
+                        1);          /* pin task to core 1 */
+    delay(500); 
+    Serial.println("Date recording thread started");
 }
 
-void startRecording()
-{
-  recording = true;
+void displayWebPageCode(void * parameter){
+    for(;;) //Keep process always running
+        delay(1);
+}
+
+void recordDataCode(void * parameter){
+    for(;;) //Keep process always running
+    {
+        recording = digitalRead(recordSwitch);
+        if(recording) {
+            //detachInterrupt(recordSwitch);
+            logData();
+            delay(500);
+            recording=false;
+            //attachInterrupt(recordSwitch,startRecording,HIGH);
+        }
+    }
+    // detachInterrupt(recordSwitch);
+    // logData();
+    // delay(500);
+    // vTaskDelete(&RecordData);
+    // attachInterrupt(recordSwitch,startRecording,HIGH);
+}
+
+void loop() {
+    //Do nothing so the esp can do wifi related stuff
+    delay(1);
+    
+    char c = tolower(Serial.read());
+
+    if(Serial.available())
+    {
+        // Discard extra Serial data.
+        do {
+            delay(10);
+        } while (Serial.available() && Serial.read() >= 0);
+
+        if (ERROR_LED_PIN >= 0) {
+            digitalWrite(ERROR_LED_PIN, LOW);
+        }
+            if (c == 'c') {
+            binaryToCsv();
+        } else if (c == 'l') {
+            Serial.println(F("\nls:"));
+            sd.ls(&Serial, LS_SIZE);
+        } else if (c == 'r') {
+            logData();
+        } else if (c == 't') {
+            testSensor();
+        } else {
+            Serial.println(F("Invalid entry"));
+        }
+    }
 }
