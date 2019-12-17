@@ -62,12 +62,29 @@ void printHeader(Print* pr) {
 // Sensor setup
 void userSetup()
 {
-    accel.begin(0x18);
-    delay(10);
-    accel.setRange(LIS3DH_RANGE_4_G);
+  boolean accelConnected = accel.begin(0x18);
+  delay(10);
+  accel.setRange(LIS3DH_RANGE_4_G);
 
-    //Wire.begin();
-    delay(10);
+  //Wire.begin();
+  delay(10);
+
+  //Check if all sensors are responding
+  if(!accelConnected)
+  {
+    Serial.println("Accelerameter not connected");
+  }
+
+  for(int i = 0; i < RPM_DIM; i++)
+  {
+    if(getRPMSensorData(rpmSensorsAdd[i]) == (2^16)-1)
+    {
+      Serial.print("Sensor ");
+      Serial.print(i);
+      Serial.println(" isn't responding");
+    }
+  }
+
 }
 
 uint16_t getRPMSensorData(uint8_t address)
@@ -75,9 +92,23 @@ uint16_t getRPMSensorData(uint8_t address)
     Wire.requestFrom(address,RPM_SENSOR_BYTES);
     
     //Give time for sensor to respond
-    while(!Wire.available());
+    uint32_t startTime = micros();
+    boolean timedOut = false;
 
-    //Reaad in data
+    while(!timedOut && !Wire.available())
+    {
+      if(micros() - startTime >= 500)
+        timedOut = true;
+    }
+
+    if(timedOut)
+    {
+      //If timed out then return a large number that the device will never see in real life
+      //A frequency of 65535 is out of reach for the baja car
+      return (2^16)-1;
+    }
+
+    //Reaad in data if there wasn't a timeout
     uint8_t msb = Wire.read();
     uint8_t lsb = Wire.read();
 

@@ -567,13 +567,7 @@ void setup(void) {
   while (!Serial) {
     SysCall::yield();
   }
-  Serial.print(F("\nFreeStack: "));
-  Serial.println(FreeStack());
-  Serial.print(F("Records/block: "));
-  Serial.println(DATA_DIM);
-  if (sizeof(block_t) != 512) {
-    error("Invalid block size");
-  }
+
   // Allow userSetup access to SPI bus.
   pinMode(SD_CS_PIN, OUTPUT);
   digitalWrite(SD_CS_PIN, HIGH);
