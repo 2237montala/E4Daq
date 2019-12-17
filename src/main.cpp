@@ -510,21 +510,15 @@ void recordDataCode(void * parameter){
             //attachInterrupt(recordSwitch,startRecording,HIGH);
         }
     }
-    // detachInterrupt(recordSwitch);
-    // logData();
-    // delay(500);
-    // vTaskDelete(&RecordData);
-    // attachInterrupt(recordSwitch,startRecording,HIGH);
 }
 
 void loop() {
     //Do nothing so the esp can do wifi related stuff
     delay(1);
     
-    char c = tolower(Serial.read());
-
     if(Serial.available())
     {
+        char c = tolower(Serial.read());
         // Discard extra Serial data.
         do {
             delay(10);
