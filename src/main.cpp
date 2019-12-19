@@ -111,6 +111,7 @@ void binaryToCsv() {
   boolean moreFiles = true;
   uint8_t fileCounter = 0;
   char name[FILE_NAME_DIM];
+  binFile.close();
 
   while(moreFiles)
   {
@@ -273,7 +274,7 @@ void recordBinFile() {
   while(1) {
      // Time for next data record.
     logTime += LOG_INTERVAL_USEC;
-    if (Serial.available() || !digitalRead(recordSwitch)) {
+    if (digitalRead(recordSwitch)) {
       closeFile = true;
     }
     if (closeFile) {
@@ -306,18 +307,25 @@ void recordBinFile() {
         if (ERROR_LED_PIN >= 0) {
           digitalWrite(ERROR_LED_PIN, HIGH);
         }
-  #if ABORT_ON_OVERRUN
-          Serial.println(F("Overrun abort"));
-          break;
-  #endif  // ABORT_ON_OVERRUN
-        } else {
-          if (curBlock->count == DATA_DIM) {
-            fullQueue[fullHead] = curBlock;
-            fullHead = fullHead < QUEUE_LAST ? fullHead + 1 : 0;
-            curBlock = 0;
-          }
+        #if ABORT_ON_OVERRUN
+                Serial.println(F("Overrun abort"));
+                break;
+        #endif  // ABORT_ON_OVERRUN
+            } else {
+        #if USE_SHARED_SPI
+                sd.card()->spiStop();
+        #endif  // USE_SHARED_SPI
+                acquireData(&curBlock->data[curBlock->count++]);
+        #if USE_SHARED_SPI
+                sd.card()->spiStart();
+        #endif  // USE_SHARED_SPI
+        if (curBlock->count == DATA_DIM) {
+          fullQueue[fullHead] = curBlock;
+          fullHead = fullHead < QUEUE_LAST ? fullHead + 1 : 0;
+          curBlock = 0;
         }
       }
+    }
       if (fullHead == fullTail) {
         // Exit loop if done.
         if (closeFile) {
@@ -445,6 +453,7 @@ void setup() {
     digitalWrite(SD_CS_PIN, HIGH);
 
     // Setup sensors.
+    delay(1000); //Give the sensors a chance to start up
     if (!userSetup())
     {
         fatalBlink();
@@ -489,7 +498,6 @@ void setup() {
                         1,           /* priority of the task */
                         &RecordData, /* Task handle to keep track of created task */
                         1);          /* pin task to core 1 */
-    delay(500); 
     Serial.println("Date recording thread started");
 }
 
@@ -501,7 +509,7 @@ void displayWebPageCode(void * parameter){
 void recordDataCode(void * parameter){
     for(;;) //Keep process always running
     {
-        recording = digitalRead(recordSwitch);
+        recording = !digitalRead(recordSwitch);
         if(recording) {
             //detachInterrupt(recordSwitch);
             logData();
