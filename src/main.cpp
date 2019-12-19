@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <SPI.h>
 #include "SdFat.h"
 #include "FreeStack.h"
@@ -87,6 +88,11 @@ struct block_t {
 const uint8_t recordSwitch = 4;
 boolean recording = false;
 boolean wifiTransfer = false;
+
+//Variables for website
+const char *ssid = "MyESP32AP";
+const char *password = "testpassword";
+
 
 //Objects for the two threads the esp will run
 TaskHandle_t DisplayWebPage, RecordData;
@@ -502,6 +508,11 @@ void setup() {
 }
 
 void displayWebPageCode(void * parameter){
+    WiFi.softAP(ssid, password);
+ 
+    Serial.println();
+    Serial.print("IP address:  ");
+    Serial.println(WiFi.softAPIP());
     for(;;) //Keep process always running
         delay(1);
 }
