@@ -5,6 +5,7 @@
 #include "FreeStack.h"
 #include "UserTypes.h"
 #include "main.h"
+#include "SerialCmds.h"
 
 //==============================================================================
 // Start of configuration constants.
@@ -62,7 +63,7 @@ const uint8_t BUFFER_BLOCK_COUNT = 12;
 
 // Size of file base name.
 const uint8_t BASE_NAME_SIZE = sizeof(FILE_BASE_NAME) - 1;
-const uint8_t FILE_NAME_DIM  = BASE_NAME_SIZE + 7;
+const uint8_t FILE_NAME_DIM  = BASE_NAME_SIZE + 8;
 char binName[FILE_NAME_DIM] = FILE_BASE_NAME "00.bin";
 
 SdFat sd;
@@ -88,7 +89,11 @@ struct block_t {
 const uint8_t recordSwitch = 7;
 boolean recording = false;
 boolean wifiTransfer = false;
-
+boolean connected = false;
+bool newFiles = false;
+#define USE_WIFI true 
+#define MAX_FILES 100
+//char fileNames[MAX_FILES][FILE_NAME_DIM];
 
 void startRecording() {
   recording = true;
@@ -440,6 +445,103 @@ void testSensor() {
   }
 }
 //------------------------------------------------------------------------------
+void connectWifi() {
+  uint32_t startTime = millis();
+  Serial.println("Connecting to Wifi module");
+  while((millis() - startTime < 5000) && !connected)
+  {
+    if(Serial1.available()>0 && Serial1.readStringUntil(EOL).compareTo(RDY) == 0)
+    {
+      //WIFI is connected
+      sendCmd(ACK,true);
+      if(waitForACK(1000))
+      {
+        sendCmd(ACK,true);
+        connected = true;
+        break;
+      }
+    }
+  }
+  if(connected)
+    Serial.println("Wifi module connected");
+  else
+    Serial.println("Wifi NOT module connected");
+  Serial1.flush(); //Clear all commands incase extra were sent
+}
+
+boolean waitForACK(uint32_t timeout) {
+  uint32_t startTime = millis();
+  while((millis() - startTime) < timeout)
+  {
+    if(Serial1.available()>0)
+    {
+      if(Serial1.readStringUntil(EOL).compareTo(ACK) == 0)
+      {
+        Serial.println("ACK recieved");
+        return true;
+      }
+    }
+  }
+  Serial.println("NAK");
+  return false;
+}
+
+void sendCmd(String cmd,boolean addEOL=true)
+{
+  Serial1.print(cmd);
+  Serial.println(cmd);
+  if(addEOL) {
+    Serial1.print(EOL);
+  }
+}
+
+void transferFileNames()
+{
+  //Count the number of files on the sd card
+  bool moreFiles = true;
+  uint8_t fileCounter = 0; //Number of data files on the sd card
+  char name[FILE_NAME_DIM];
+
+  while(moreFiles && fileCounter < 100)
+  {
+    sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
+    //Serial.println(name);
+    fileCounter++;
+    if(!sd.exists(name))
+    {
+      moreFiles = false;
+      break;
+    }
+    
+  }
+  //Send the files names over the the wifi module
+  Serial.println("Transfering file names");
+  sendCmd(RDY);
+  if(waitForACK(1000))
+  {
+    sendCmd(FNAME);
+    delay(100);
+    Serial.println("Transfer started");
+    int i = 0;
+    while(i<fileCounter)
+    {
+      sprintf(name,FILE_BASE_NAME "%02d.bin",i);
+      sendCmd(name); //Send over files name
+
+      if(!waitForACK(1000))
+      {
+        Serial.println("Wifi didn't respond during transfer");
+        break;
+      }
+      i++;
+    }
+    sendCmd(END,false); //End tranfer
+  }
+  else
+  {
+    Serial.println("No response");
+  }
+}
 
 void setup() {
     if (ERROR_LED_PIN >= 0) {
@@ -473,20 +575,36 @@ void setup() {
     {
         //Always recover a file. It might be useful
         recoverTmpFile();
-        delay(500);
+        delay(200);
     }
 
     //Define recording switch as a interrupt 
     pinMode(recordSwitch,INPUT);
+
+    //Transfer file names to esp32
+    #if USE_WIFI
+    Serial1.begin(115200);
+    connectWifi();
+    delay(1000);
+    transferFileNames();
+    #endif
+    
 }
 
 void loop() {
     //Do nothing so the esp can do wifi related stuff
     recording = !digitalRead(recordSwitch);
     if(recording) {
-        logData();
-        delay(500);
-        recording=false;
+      digitalWrite(LED_BUILTIN,HIGH);
+      logData();
+      delay(200);
+      recording=false;
+      digitalWrite(LED_BUILTIN,LOW);
+    }
+    else if(Serial1.available() > 0)
+    {
+      //Wifi module sent something
+      
     }
     
     if(Serial.available()){
