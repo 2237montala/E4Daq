@@ -525,7 +525,7 @@ void transferFileNames()
     int i = 0;
     while(i<fileCounter)
     {
-      sprintf(name,FILE_BASE_NAME "%02d.bin",i);
+      sprintf(name,FILE_BASE_NAME "%02d.csv",i);
       sendCmd(name); //Send over files name
 
       if(!waitForACK(1000))
