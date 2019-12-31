@@ -451,10 +451,10 @@ bool connectWifi() {
     if(Serial1.available()>0 && Serial1.readStringUntil(EOL).compareTo(RDY) == 0)
     {
       //WIFI is connected
-      sendCmd(ACK,true);
+      sendCmd(ACK,true,false);
       if(waitForACK(1000))
       {
-        sendCmd(ACK,true);
+        sendCmd(ACK,true,false);
         connected = true;
         break;
       }
@@ -476,7 +476,7 @@ bool waitForACK(uint32_t timeout) {
     {
       if(Serial1.readStringUntil(EOL).compareTo(ACK) == 0)
       {
-        Serial.println("ACK recieved");
+        //Serial.println("ACK recieved");
         return true;
       }
     }
@@ -498,9 +498,10 @@ bool getCMD(String& incomingCmd,uint32_t timeout) {
   return false;
 }
 
-void sendCmd(String cmd,boolean addEOL=true) {
+void sendCmd(String cmd,boolean addEOL=true,bool printCMD = false) {
   Serial1.print(cmd);
-  Serial.println(cmd);
+  if(printCMD)
+    Serial.println(cmd);
   if(addEOL) {
     Serial1.print(EOL);
   }
@@ -516,12 +517,13 @@ void transferFileNames() {
   {
     sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
     //Serial.println(name);
-    fileCounter++;
+    
     if(!sd.exists(name))
     {
       moreFiles = false;
       break;
     }
+    fileCounter++;
     
   }
   //Send the files names over the the wifi module
@@ -553,8 +555,7 @@ void transferFileNames() {
   }
 }
 
-void transferFile()
-{
+void transferFile() {
   //Get file name from wifi module
   String fileName;
   if(!getCMD(fileName,1000))
@@ -566,12 +567,10 @@ void transferFile()
   //Convert file to csv
   if(sd.exists(fileNameChar))
   {
-    binaryToCsv(fileNameChar);
-    //Send file over by line
-    File file = sd.open(fileNameChar,FILE_READ);
-    if(!file)
-    {
-      Serial.println("Couldn't open csv file");
+    binFile.close(); //Close any open files just in case
+    
+    if(!binFile.open(fileNameChar)) { //Open the file requested
+      Serial.println("Couldn't open bin file");
       return;
     }
     Serial.println("File opened");
@@ -584,24 +583,30 @@ void transferFile()
 
     Serial.println("Sending file size");
     //Send size of file
-    uint32_t fileSize = file.fileSize(); //In bytes
-    Serial.println(fileSize);
+    uint32_t fileSize = binFile.fileSize(); //In bytes
     sendCmd(String(fileSize));
     if(!waitForACK(5000)) {
       Serial.println("Not ready after file size");
       return;
     }
 
-    file.seek(0);
-    while(file.available())
-    {
-      char byte = file.read();
-      sendCmd(String(byte),true);
+    block_t block;
+    binFile.rewind(); //Go to the begining of the file
+    printHeader(&Serial1);
+    Serial1.print(EOL);
 
-      if(!waitForACK(5000))
-      {
-        Serial.println("No response");
-        return;
+    while (binFile.read(&block , 512) == 512) {
+      if (block.count == 0) {
+        break;
+      }
+      for (uint16_t i = 0; i < block.count; i++) {
+        printData(&Serial1, &block.data[i]);
+        Serial1.print(EOL);
+        if(!waitForACK(5000))
+        {
+          Serial.println("No response");
+          return;
+        }
       }
     }
   }
@@ -656,7 +661,8 @@ void setup() {
     if(connectWifi())
     {
       delay(1000);
-      transferFileNames();
+      //transferFileNames();
+      //Serial.println("Done");
     }    
     #endif
     
@@ -679,6 +685,8 @@ void loop() {
       if(cmd.compareTo(FNAME) == 0)
       {
         //Transfer file names
+        sendCmd(ACK,true);
+        transferFileNames();
       }
       else if(cmd.compareTo(FDATA) == 0)
       {
