@@ -516,7 +516,6 @@ void transferFileNames() {
   while(moreFiles && fileCounter < 100)
   {
     sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
-    //Serial.println(name);
     
     if(!sd.exists(name))
     {
