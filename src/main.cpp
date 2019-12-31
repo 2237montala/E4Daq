@@ -93,10 +93,28 @@ boolean connected = false;
 bool newFiles = false;
 #define USE_WIFI true 
 #define MAX_FILES 100
-//char fileNames[MAX_FILES][FILE_NAME_DIM];
 
 void startRecording() {
   recording = true;
+}
+
+void allToCSV() {
+  boolean moreFiles = true;
+  uint8_t fileCounter = 0;
+  char name[FILE_NAME_DIM];
+  binFile.close(); //close any open file
+  while(moreFiles) {
+    sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
+    Serial.println(name);
+    if(sd.exists(name)) {
+      binaryToCsv(name);
+      fileCounter++;
+    }
+    else {
+      Serial.println("All files converted");
+      moreFiles = false;
+    }
+  }
 }
 
 void fatalBlink() {
@@ -111,16 +129,7 @@ void fatalBlink() {
   }
 }
 //------------------------------------------------------------------------------
-void binaryToCsv() {
-  boolean moreFiles = true;
-  uint8_t fileCounter = 0;
-  char name[FILE_NAME_DIM];
-  binFile.close();
-
-  while(moreFiles)
-  {
-    sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
-    Serial.println(name);
+void binaryToCsv(char* fileName) {
     uint8_t lastPct = 0;
     block_t block;
     uint32_t t0 = millis();
@@ -128,16 +137,8 @@ void binaryToCsv() {
     SdFile csvFile;
     char csvName[FILE_NAME_DIM];
 
-    if(!binFile.open(name,O_RDONLY))
-    {
-      //Current file doens't exist so there are no more
-      Serial.println("All files converted");
-      moreFiles = false;
-      return;
-    }
-
     // Create a new csvFile.
-    strcpy(csvName, name);
+    strcpy(csvName, fileName);
     strcpy(&csvName[BASE_NAME_SIZE + 3], "csv");
 
     if (!csvFile.open(csvName, O_WRONLY | O_CREAT | O_TRUNC)) {
@@ -183,9 +184,6 @@ void binaryToCsv() {
     Serial.print(F("Done: "));
     Serial.print(0.001*(millis() - t0));
     Serial.println(F(" Seconds"));
-
-    fileCounter++;
-  }
 }
 //-----------------------------------------------------------------------------
 void createBinFile() {
@@ -445,7 +443,7 @@ void testSensor() {
   }
 }
 //------------------------------------------------------------------------------
-void connectWifi() {
+bool connectWifi() {
   uint32_t startTime = millis();
   Serial.println("Connecting to Wifi module");
   while((millis() - startTime < 5000) && !connected)
@@ -467,9 +465,10 @@ void connectWifi() {
   else
     Serial.println("Wifi NOT module connected");
   Serial1.flush(); //Clear all commands incase extra were sent
+  return connected;
 }
 
-boolean waitForACK(uint32_t timeout) {
+bool waitForACK(uint32_t timeout) {
   uint32_t startTime = millis();
   while((millis() - startTime) < timeout)
   {
@@ -486,8 +485,20 @@ boolean waitForACK(uint32_t timeout) {
   return false;
 }
 
-void sendCmd(String cmd,boolean addEOL=true)
-{
+bool getCMD(String& incomingCmd,uint32_t timeout) {
+  uint32_t startTime = millis();
+  while(millis() - startTime < timeout)
+  {
+    if(Serial1.available() > 0)
+    {
+      incomingCmd = Serial1.readStringUntil(EOL);
+      return true;
+    }
+  }
+  return false;
+}
+
+void sendCmd(String cmd,boolean addEOL=true) {
   Serial1.print(cmd);
   Serial.println(cmd);
   if(addEOL) {
@@ -495,8 +506,7 @@ void sendCmd(String cmd,boolean addEOL=true)
   }
 }
 
-void transferFileNames()
-{
+void transferFileNames() {
   //Count the number of files on the sd card
   bool moreFiles = true;
   uint8_t fileCounter = 0; //Number of data files on the sd card
@@ -525,7 +535,7 @@ void transferFileNames()
     int i = 0;
     while(i<fileCounter)
     {
-      sprintf(name,FILE_BASE_NAME "%02d.csv",i);
+      sprintf(name,FILE_BASE_NAME "%02d.bin",i);
       sendCmd(name); //Send over files name
 
       if(!waitForACK(1000))
@@ -541,6 +551,65 @@ void transferFileNames()
   {
     Serial.println("No response");
   }
+}
+
+void transferFile()
+{
+  //Get file name from wifi module
+  String fileName;
+  if(!getCMD(fileName,1000))
+    Serial.println("No response");
+
+  char fileNameChar[FILE_NAME_DIM];
+  fileName.toCharArray(fileNameChar,FILE_NAME_DIM);
+
+  //Convert file to csv
+  if(sd.exists(fileNameChar))
+  {
+    binaryToCsv(fileNameChar);
+    //Send file over by line
+    File file = sd.open(fileNameChar,FILE_READ);
+    if(!file)
+    {
+      Serial.println("Couldn't open csv file");
+      return;
+    }
+    Serial.println("File opened");
+
+    sendCmd(RDY,true);
+    if(!waitForACK(5000)) {
+      Serial.println("Not ready");
+      return;
+    }
+
+    Serial.println("Sending file size");
+    //Send size of file
+    uint32_t fileSize = file.fileSize(); //In bytes
+    Serial.println(fileSize);
+    sendCmd(String(fileSize));
+    if(!waitForACK(5000)) {
+      Serial.println("Not ready after file size");
+      return;
+    }
+
+    file.seek(0);
+    while(file.available())
+    {
+      char byte = file.read();
+      sendCmd(String(byte),true);
+
+      if(!waitForACK(5000))
+      {
+        Serial.println("No response");
+        return;
+      }
+    }
+  }
+  else{
+    Serial.println("File doesn't exist");
+  }
+
+  sendCmd(END,true);
 }
 
 void setup() {
@@ -584,9 +653,11 @@ void setup() {
     //Transfer file names to esp32
     #if USE_WIFI
     Serial1.begin(115200);
-    connectWifi();
-    delay(1000);
-    transferFileNames();
+    if(connectWifi())
+    {
+      delay(1000);
+      transferFileNames();
+    }    
     #endif
     
 }
@@ -604,7 +675,17 @@ void loop() {
     else if(Serial1.available() > 0)
     {
       //Wifi module sent something
-      
+      String cmd = Serial1.readStringUntil(EOL);
+      if(cmd.compareTo(FNAME) == 0)
+      {
+        //Transfer file names
+      }
+      else if(cmd.compareTo(FDATA) == 0)
+      {
+        //Transfer file data
+        sendCmd(ACK,true);
+        transferFile();
+      }
     }
     
     if(Serial.available()){
@@ -618,7 +699,7 @@ void loop() {
             digitalWrite(ERROR_LED_PIN, LOW);
         }
             if (c == 'c') {
-            binaryToCsv();
+            allToCSV();
         } else if (c == 'l') {
             Serial.println(F("\nls:"));
             sd.ls(&Serial, LS_SIZE);

@@ -7,9 +7,10 @@ void renameBinFile();
 void startRecording();
 void displayWebPageCode(void * parameter);
 void recordDataCode(void * parameter);
-void connectWifi();
+bool connectWifi();
 void transferFileNames();
-boolean waitForACK(uint32_t timeout);
+bool waitForACK(uint32_t timeout);
+bool getCMD(String& incomingCmd,uint32_t timeout);
 void sendCmd(String cmd, boolean addEOL);
-
+void binaryToCsv(char* fileName);
 #endif
