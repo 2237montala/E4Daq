@@ -616,6 +616,30 @@ void transferFile() {
   sendCmd(END,true);
 }
 
+void deleteFile() {
+  //Get file name from wifi module
+  String fileName;
+  if(!getCMD(fileName,1000))
+    Serial.println("No response");
+
+  char fileNameChar[FILE_NAME_DIM];
+  fileName.toCharArray(fileNameChar,FILE_NAME_DIM);
+
+  //Convert file to csv
+  if(sd.exists(fileNameChar))
+  {
+    if(!sd.remove(fileNameChar)) {
+      //Deletion error
+      sendCmd(ERR);
+    }
+    else {
+      sendCmd(ACK); //Deletion was completed
+    }
+    
+    
+  }
+}
+
 void setup() {
     if (ERROR_LED_PIN >= 0) {
         pinMode(ERROR_LED_PIN, OUTPUT);
@@ -656,7 +680,7 @@ void setup() {
 
     //Transfer file names to esp32
     #if USE_WIFI
-    Serial1.begin(115200);
+    Serial1.begin(250000);
     if(connectWifi())
     {
       delay(1000);
@@ -692,6 +716,11 @@ void loop() {
         //Transfer file data
         sendCmd(ACK,true);
         transferFile();
+      }
+      else if(cmd.compareTo(DEL) == 0)
+      {
+        sendCmd(ACK);
+        deleteFile();
       }
     }
     
