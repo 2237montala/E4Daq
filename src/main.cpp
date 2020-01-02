@@ -65,6 +65,7 @@ const uint8_t BUFFER_BLOCK_COUNT = 12;
 const uint8_t BASE_NAME_SIZE = sizeof(FILE_BASE_NAME) - 1;
 const uint8_t FILE_NAME_DIM  = BASE_NAME_SIZE + 8;
 char binName[FILE_NAME_DIM] = FILE_BASE_NAME "00.bin";
+const char FILE_EXT[5] = ".bin";
 
 SdFat sd;
 SdBaseFile binFile;
@@ -508,49 +509,32 @@ void sendCmd(String cmd,boolean addEOL=true,bool printCMD = false) {
 }
 
 void transferFileNames() {
-  //Count the number of files on the sd card
-  bool moreFiles = true;
-  uint8_t fileCounter = 0; //Number of data files on the sd card
-  char name[FILE_NAME_DIM];
+  SdFile root;
+    SdFile file;
+    root.open("/");
+  //file.open("/");
+  char fileName[13];
 
-  while(moreFiles && fileCounter < 100)
-  {
-    sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
-    
-    if(!sd.exists(name))
-    {
-      moreFiles = false;
-      break;
-    }
-    fileCounter++;
-    
-  }
-  //Send the files names over the the wifi module
+  //Send all csv file over
   Serial.println("Transfering file names");
   sendCmd(RDY);
-  if(waitForACK(1000))
-  {
-    sendCmd(FNAME);
-    delay(100);
+  if(waitForACK(1000)) {
     Serial.println("Transfer started");
-    int i = 0;
-    while(i<fileCounter)
-    {
-      sprintf(name,FILE_BASE_NAME "%02d.bin",i);
-      sendCmd(name); //Send over files name
-
-      if(!waitForACK(1000))
-      {
-        Serial.println("Wifi didn't respond during transfer");
-        break;
+    while (file.openNext(&root, O_READ)) {
+      if (file.isFile()) {
+        file.getName(fileName,13);
+        if (strcmp(FILE_EXT, &fileName[strlen(fileName)-strlen(FILE_EXT)]) == 0) {
+          //File is a csv file
+          sendCmd(fileName,true,true); //Send over files name
+          if(!waitForACK(1000)) {
+            Serial.println("Wifi didn't respond during transfer");
+            break;
+          }
+        }
       }
-      i++;
+      file.close();
     }
-    sendCmd(END,false); //End tranfer
-  }
-  else
-  {
-    Serial.println("No response");
+    sendCmd(END,true,false); //End tranfer
   }
 }
 
@@ -618,6 +602,7 @@ void transferFile() {
 
 void deleteFile() {
   //Get file name from wifi module
+  Serial.println("Deleting file");
   String fileName;
   if(!getCMD(fileName,1000))
     Serial.println("No response");
@@ -628,15 +613,13 @@ void deleteFile() {
   //Convert file to csv
   if(sd.exists(fileNameChar))
   {
-    if(!sd.remove(fileNameChar)) {
+    if(sd.remove(fileNameChar)) {
+      sendCmd(ACK); //Deletion was completed
+    }
+    else {
       //Deletion error
       sendCmd(ERR);
     }
-    else {
-      sendCmd(ACK); //Deletion was completed
-    }
-    
-    
   }
 }
 
@@ -674,7 +657,6 @@ void setup() {
         recoverTmpFile();
         delay(200);
     }
-
     //Define recording switch as a interrupt 
     pinMode(recordSwitch,INPUT);
 
@@ -722,6 +704,8 @@ void loop() {
         sendCmd(ACK);
         deleteFile();
       }
+      Serial.println();
+      Serial1.flush();
     }
     
     if(Serial.available()){
