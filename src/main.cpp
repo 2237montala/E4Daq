@@ -94,6 +94,7 @@ boolean connected = false;
 bool newFiles = false;
 #define USE_WIFI true 
 #define MAX_FILES 100
+#define SERIAL1_SPD 250000
 
 void startRecording() {
   recording = true;
@@ -512,7 +513,6 @@ void transferFileNames() {
   SdFile root;
     SdFile file;
     root.open("/");
-  //file.open("/");
   char fileName[13];
 
   //Send all csv file over
@@ -662,7 +662,7 @@ void setup() {
 
     //Transfer file names to esp32
     #if USE_WIFI
-    Serial1.begin(250000);
+    Serial1.begin(SERIAL1_SPD);
     if(connectWifi())
     {
       delay(1000);
@@ -677,11 +677,18 @@ void loop() {
     //Do nothing so the esp can do wifi related stuff
     recording = !digitalRead(recordSwitch);
     if(recording) {
+      Serial1.flush();
+      Serial1.end();
+      delay(5);
+      
       digitalWrite(LED_BUILTIN,HIGH);
       logData();
-      delay(200);
       recording=false;
       digitalWrite(LED_BUILTIN,LOW);
+      
+      delay(5);
+      Serial1.begin(SERIAL1_SPD);
+      Serial1.flush();
     }
     else if(Serial1.available() > 0)
     {
