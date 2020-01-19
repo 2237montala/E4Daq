@@ -13,4 +13,6 @@ bool waitForACK(uint32_t timeout);
 bool getCMD(String& incomingCmd,uint32_t timeout);
 void sendCmd(String cmd, boolean addEOL,bool printCMD);
 void binaryToCsv(char* fileName);
+void checkButtons(int butLeft, int butRight);
+
 #endif

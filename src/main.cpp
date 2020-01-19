@@ -14,7 +14,7 @@
 #define ABORT_ON_OVERRUN 1
 //------------------------------------------------------------------------------
 //Interval between data records in microseconds.
-const uint32_t LOG_INTERVAL_USEC = 3600; //Number is in milliseconds
+const uint32_t LOG_INTERVAL_USEC = 10000; //Number is in milliseconds
 //------------------------------------------------------------------------------
 // Set USE_SHARED_SPI non-zero for use of an SPI sensor.
 // May not work for some cards.
@@ -92,9 +92,19 @@ boolean recording = false;
 boolean wifiTransfer = false;
 boolean connected = false;
 bool newFiles = false;
-#define USE_WIFI true 
+#define USE_WIFI false
 #define MAX_FILES 100
 #define SERIAL1_SPD 250000
+bool buttonActive = false;
+bool butLeftPressed = false;
+bool butRightPressed = false;
+bool longPressActive = false;
+uint32_t buttonHeldTimer = 0;
+uint32_t buttonTriggerLen = 500;
+
+#define buttonLeft 12
+#define buttonRight 9
+
 
 void startRecording() {
   recording = true;
@@ -278,7 +288,8 @@ void recordBinFile() {
   while(1) {
      // Time for next data record.
     logTime += LOG_INTERVAL_USEC;
-    if (digitalRead(recordSwitch)) {
+    checkButtons(buttonLeft,buttonRight);
+    if (recording == false) {
       closeFile = true;
     }
     if (closeFile) {
@@ -637,6 +648,9 @@ void setup() {
     pinMode(SD_CS_PIN, OUTPUT);
     digitalWrite(SD_CS_PIN, HIGH);
 
+    pinMode(buttonLeft,INPUT);
+    pinMode(buttonRight,INPUT);
+
     // Setup sensors.
     delay(1000); //Give the sensors a chance to start up
     if (!userSetup())
@@ -673,9 +687,63 @@ void setup() {
     
 }
 
+void checkButtons(int butLeft, int butRight) {
+  bool butLeftState = !digitalRead(butLeft);
+  bool butRightState = !digitalRead(butRight);
+
+  if(butLeftState == true)
+  {
+    //If left button is pressed change its state
+    if(buttonActive == false)
+    {
+      buttonActive = true;
+      buttonHeldTimer = millis();
+      //Serial.println("Left Pressed");
+    }
+    butLeftPressed = true;
+    //Serial.println("Left Pressed");
+  }
+
+  if(butRightState == true)
+  {
+    //If right button is pressed change its state
+    if(buttonActive == false)
+    {
+      buttonActive = true;
+      buttonHeldTimer = millis();
+      //Serial.println("Right button pressd");
+    }
+    butRightPressed=true;
+  }
+
+  if((buttonActive == true && (millis() - buttonHeldTimer > buttonTriggerLen))
+      && longPressActive == false)
+  {
+    //If any button is pressed and the button held timer is greater than the
+    //held button length. Enable the long press
+    longPressActive = true;
+    //If on the record menu and holding both buttons down, start recording
+    recording = !recording;
+  }
+
+  if(buttonActive == true && (butLeftState == false && butRightState == false)) {
+    //If a button was pressed in the previous loop but now none are pressed
+    //Then disable the long press and change the button state vars
+    if(longPressActive == true) {
+      longPressActive = false;
+    }
+  } else {
+    buttonActive = false;
+    butLeftPressed = false;
+    butRightPressed = false;
+  }
+}
+
 void loop() {
     //Do nothing so the esp can do wifi related stuff
-    recording = !digitalRead(recordSwitch);
+
+    //recording = !digitalRead(recordSwitch);
+    checkButtons(buttonLeft,buttonRight);
     if(recording) {
       Serial1.flush();
       Serial1.end();
@@ -713,29 +781,5 @@ void loop() {
       }
       Serial.println();
       Serial1.flush();
-    }
-    
-    if(Serial.available()){
-        char c = tolower(Serial.read());
-        // Discard extra Serial data.
-        do {
-            delay(10);
-        } while (Serial.available() && Serial.read() >= 0);
-
-        if (ERROR_LED_PIN >= 0) {
-            digitalWrite(ERROR_LED_PIN, LOW);
-        }
-            if (c == 'c') {
-            allToCSV();
-        } else if (c == 'l') {
-            Serial.println(F("\nls:"));
-            sd.ls(&Serial, LS_SIZE);
-        } else if (c == 'r') {
-            logData();
-        } else if (c == 't') {
-            testSensor();
-        } else {
-            Serial.println(F("Invalid entry"));
-        }
     }
 }
