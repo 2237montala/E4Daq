@@ -103,7 +103,7 @@ uint32_t buttonHeldTimer = 0;
 uint32_t buttonTriggerLen = 500;
 
 #define buttonLeft 12
-#define buttonRight 9
+#define buttonRight 11
 
 
 void startRecording() {
@@ -683,6 +683,8 @@ void setup() {
       //transferFileNames();
       //Serial.println("Done");
     }    
+    #else 
+    Serial.println("Wifi disabled");
     #endif
     
 }
@@ -698,7 +700,7 @@ void checkButtons(int butLeft, int butRight) {
     {
       buttonActive = true;
       buttonHeldTimer = millis();
-      //Serial.println("Left Pressed");
+      Serial.println("Left Pressed");
     }
     butLeftPressed = true;
     //Serial.println("Left Pressed");
@@ -711,7 +713,7 @@ void checkButtons(int butLeft, int butRight) {
     {
       buttonActive = true;
       buttonHeldTimer = millis();
-      //Serial.println("Right button pressd");
+      Serial.println("Right button pressd");
     }
     butRightPressed=true;
   }
@@ -721,18 +723,24 @@ void checkButtons(int butLeft, int butRight) {
   {
     //If any button is pressed and the button held timer is greater than the
     //held button length. Enable the long press
-    longPressActive = true;
-    //If on the record menu and holding both buttons down, start recording
-    recording = !recording;
+    if(buttonLeft && buttonRight) {
+      Serial.println("Double button long press active");
+    
+      longPressActive = true;
+      //If on the record menu and holding both buttons down, start recording
+      recording = !recording;
+    }
+    
   }
 
   if(buttonActive == true && (butLeftState == false && butRightState == false)) {
     //If a button was pressed in the previous loop but now none are pressed
     //Then disable the long press and change the button state vars
     if(longPressActive == true) {
+      Serial.println("Long press stopped");
       longPressActive = false;
     }
-  } else {
+
     buttonActive = false;
     butLeftPressed = false;
     butRightPressed = false;
@@ -745,9 +753,11 @@ void loop() {
     //recording = !digitalRead(recordSwitch);
     checkButtons(buttonLeft,buttonRight);
     if(recording) {
+      #if USE_WIFI
       Serial1.flush();
       Serial1.end();
-      delay(5);
+      #endif
+      delay(2000);
       
       digitalWrite(LED_BUILTIN,HIGH);
       logData();
@@ -755,8 +765,10 @@ void loop() {
       digitalWrite(LED_BUILTIN,LOW);
       
       delay(5);
+      #if USE_WIFI
       Serial1.begin(SERIAL1_SPD);
       Serial1.flush();
+      #endif
     }
     else if(Serial1.available() > 0)
     {
