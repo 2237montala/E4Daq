@@ -8,7 +8,7 @@
 static uint32_t startMicros;
 
 //RPM Sensor addresses
-uint8_t rpmSensorsAdd[RPM_DIM] = {0,1};
+uint8_t rpmSensorsAdd[RPM_DIM] = {0,1,2};
 
 Adafruit_LIS3DH accel = Adafruit_LIS3DH();
 

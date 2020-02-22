@@ -92,7 +92,7 @@ boolean recording = false;
 boolean wifiTransfer = false;
 boolean connected = false;
 bool newFiles = false;
-#define USE_WIFI false
+#define USE_WIFI true
 #define MAX_FILES 100
 #define SERIAL1_SPD 250000
 bool buttonActive = false;
@@ -104,6 +104,11 @@ uint32_t buttonTriggerLen = 500;
 
 #define buttonLeft 12
 #define buttonRight 11
+
+//Sets how long the recording will be from pressing the steering wheel buttons
+#define recordingLenSec 15
+const unsigned long recordTimeLen = recordingLenSec*1000000;
+long recordMenuRecAmt = 0; //How long it has been recording
 
 
 void startRecording() {
@@ -285,10 +290,19 @@ void recordBinFile() {
   uint32_t overrun = 0;
   uint32_t overrunTotal = 0;
   uint32_t logTime = micros();
+  uint32_t startTime = logTime;
   while(1) {
      // Time for next data record.
     logTime += LOG_INTERVAL_USEC;
-    checkButtons(buttonLeft,buttonRight);
+
+    //Check if the buttons were pressed to stop recording
+    //checkButtons(buttonLeft,buttonRight);
+
+    //Check if recording time has been longer than recordTimeLen
+    if(logTime > startTime + recordTimeLen) {
+      recording = false;
+    }
+
     if (recording == false) {
       closeFile = true;
     }
