@@ -3,6 +3,11 @@
 //Almost all the code comes from https://forum.arduino.cc/index.php?topic=396804.0 which is in SAMD21
 //Converting to SAMD51 was done with examples from https://forum.arduino.cc/index.php?topic=589655.0
 
+// NEED TO CROSS REFERENCE THIS ARDUINO FORUM LINK TO CORRECT THIS CODE
+// I LOST THE FINAL VERSION SO THIS VERSION IS BEFORE I MADE THE FORUM POST
+// https://forum.arduino.cc/index.php?topic=673692.0
+
+
 //#define timerClkDiv TCC_CTRLA_PRESCALER_DIV4
 
 // Setup TCC2 to capture pulse-width and period with DMAC transfer
