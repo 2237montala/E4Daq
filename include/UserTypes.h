@@ -3,7 +3,7 @@
 #include <Arduino.h>
 // User data types.  Modify for your data items.
 #define FILE_BASE_NAME "data"
-const uint8_t RPM_DIM = 2;
+const uint8_t RPM_DIM = 3;
 const uint8_t RPM_SENSOR_BYTES = 2;
 struct data_t {
   uint32_t time;

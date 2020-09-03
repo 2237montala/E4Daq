@@ -8,9 +8,11 @@
 static uint32_t startMicros;
 
 //RPM Sensor addresses
-uint8_t rpmSensorsAdd[RPM_DIM] = {0,1};
+uint8_t rpmSensorsAdd[RPM_DIM] = {0,1,2};
 
 Adafruit_LIS3DH accel = Adafruit_LIS3DH();
+
+bool record = false;
 
 // Acquire a data record.
 void acquireData(data_t* data) 
@@ -66,7 +68,8 @@ boolean userSetup()
   delay(10);
   accel.setRange(LIS3DH_RANGE_4_G);
 
-  //Wire.begin();
+  Wire.begin();
+  Wire.setClock(400000);
   delay(10);
 
   //Check if all sensors are responding
@@ -117,3 +120,4 @@ uint16_t getRPMSensorData(uint8_t address)
 
     return (msb << 8) + lsb;
 }
+

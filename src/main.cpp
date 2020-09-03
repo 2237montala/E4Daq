@@ -1,10 +1,11 @@
 #include <Arduino.h>
-#include <WiFi.h>
+
 #include <SPI.h>
 #include "SdFat.h"
 #include "FreeStack.h"
 #include "UserTypes.h"
 #include "main.h"
+#include "SerialCmds.h"
 
 //==============================================================================
 // Start of configuration constants.
@@ -13,7 +14,7 @@
 #define ABORT_ON_OVERRUN 1
 //------------------------------------------------------------------------------
 //Interval between data records in microseconds.
-const uint32_t LOG_INTERVAL_USEC = 3600; //Number is in milliseconds
+const uint32_t LOG_INTERVAL_USEC = 10000; //Number is in milliseconds
 //------------------------------------------------------------------------------
 // Set USE_SHARED_SPI non-zero for use of an SPI sensor.
 // May not work for some cards.
@@ -24,7 +25,7 @@ const uint32_t LOG_INTERVAL_USEC = 3600; //Number is in milliseconds
 // Pin definitions.
 //
 // SD chip select pin.
-const uint8_t SD_CS_PIN = 5;
+const uint8_t SD_CS_PIN = 2;
 //
 // Digital pin to indicate an error, set to -1 if not used.
 // The led blinks for fatal errors. The led goes on solid for
@@ -53,7 +54,7 @@ const uint32_t FILE_BLOCK_COUNT = 256000;
 // The logger will use SdFat's buffer plus BUFFER_BLOCK_COUNT-1 additional
 // buffers.
 //
-const uint8_t BUFFER_BLOCK_COUNT = 10;
+const uint8_t BUFFER_BLOCK_COUNT = 12;
 //==============================================================================
 // End of configuration constants.
 //==============================================================================
@@ -62,8 +63,9 @@ const uint8_t BUFFER_BLOCK_COUNT = 10;
 
 // Size of file base name.
 const uint8_t BASE_NAME_SIZE = sizeof(FILE_BASE_NAME) - 1;
-const uint8_t FILE_NAME_DIM  = BASE_NAME_SIZE + 7;
+const uint8_t FILE_NAME_DIM  = BASE_NAME_SIZE + 8;
 char binName[FILE_NAME_DIM] = FILE_BASE_NAME "00.bin";
+const char FILE_EXT[5] = ".bin";
 
 SdFat sd;
 SdBaseFile binFile;
@@ -85,20 +87,51 @@ struct block_t {
 #define error(msg) {sd.errorPrint(&Serial, F(msg));fatalBlink();}
 
 //Anthony's variables
-const uint8_t recordSwitch = 4;
+const uint8_t recordSwitch = 7;
 boolean recording = false;
 boolean wifiTransfer = false;
+boolean connected = false;
+bool newFiles = false;
+#define USE_WIFI true
+#define MAX_FILES 100
+#define SERIAL1_SPD 250000
+bool buttonActive = false;
+bool butLeftPressed = false;
+bool butRightPressed = false;
+bool longPressActive = false;
+uint32_t buttonHeldTimer = 0;
+uint32_t buttonTriggerLen = 500;
 
-//Variables for website
-const char *ssid = "MyESP32AP";
-const char *password = "testpassword";
+#define buttonLeft 12
+#define buttonRight 11
 
+//Sets how long the recording will be from pressing the steering wheel buttons
+#define recordingLenSec 15
+const unsigned long recordTimeLen = recordingLenSec*1000000;
+long recordMenuRecAmt = 0; //How long it has been recording
 
-//Objects for the two threads the esp will run
-TaskHandle_t DisplayWebPage, RecordData;
 
 void startRecording() {
   recording = true;
+}
+
+void allToCSV() {
+  boolean moreFiles = true;
+  uint8_t fileCounter = 0;
+  char name[FILE_NAME_DIM];
+  binFile.close(); //close any open file
+  while(moreFiles) {
+    sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
+    Serial.println(name);
+    if(sd.exists(name)) {
+      binaryToCsv(name);
+      fileCounter++;
+    }
+    else {
+      Serial.println("All files converted");
+      moreFiles = false;
+    }
+  }
 }
 
 void fatalBlink() {
@@ -113,16 +146,7 @@ void fatalBlink() {
   }
 }
 //------------------------------------------------------------------------------
-void binaryToCsv() {
-  boolean moreFiles = true;
-  uint8_t fileCounter = 0;
-  char name[FILE_NAME_DIM];
-  binFile.close();
-
-  while(moreFiles)
-  {
-    sprintf(name,FILE_BASE_NAME "%02d.bin",fileCounter);
-    Serial.println(name);
+void binaryToCsv(char* fileName) {
     uint8_t lastPct = 0;
     block_t block;
     uint32_t t0 = millis();
@@ -130,16 +154,8 @@ void binaryToCsv() {
     SdFile csvFile;
     char csvName[FILE_NAME_DIM];
 
-    if(!binFile.open(name,O_RDONLY))
-    {
-      //Current file doens't exist so there are no more
-      Serial.println("All files converted");
-      moreFiles = false;
-      return;
-    }
-
     // Create a new csvFile.
-    strcpy(csvName, name);
+    strcpy(csvName, fileName);
     strcpy(&csvName[BASE_NAME_SIZE + 3], "csv");
 
     if (!csvFile.open(csvName, O_WRONLY | O_CREAT | O_TRUNC)) {
@@ -185,9 +201,6 @@ void binaryToCsv() {
     Serial.print(F("Done: "));
     Serial.print(0.001*(millis() - t0));
     Serial.println(F(" Seconds"));
-
-    fileCounter++;
-  }
 }
 //-----------------------------------------------------------------------------
 void createBinFile() {
@@ -277,10 +290,20 @@ void recordBinFile() {
   uint32_t overrun = 0;
   uint32_t overrunTotal = 0;
   uint32_t logTime = micros();
+  uint32_t startTime = logTime;
   while(1) {
      // Time for next data record.
     logTime += LOG_INTERVAL_USEC;
-    if (digitalRead(recordSwitch)) {
+
+    //Check if the buttons were pressed to stop recording
+    //checkButtons(buttonLeft,buttonRight);
+
+    //Check if recording time has been longer than recordTimeLen
+    if(logTime > startTime + recordTimeLen) {
+      recording = false;
+    }
+
+    if (recording == false) {
       closeFile = true;
     }
     if (closeFile) {
@@ -447,16 +470,200 @@ void testSensor() {
   }
 }
 //------------------------------------------------------------------------------
+bool connectWifi() {
+  uint32_t startTime = millis();
+  Serial.println("Connecting to Wifi module");
+  while((millis() - startTime < 5000) && !connected)
+  {
+    if(Serial1.available()>0 && Serial1.readStringUntil(EOL).compareTo(RDY) == 0)
+    {
+      //WIFI is connected
+      sendCmd(ACK,true,false);
+      if(waitForACK(1000))
+      {
+        sendCmd(ACK,true,false);
+        connected = true;
+        break;
+      }
+    }
+  }
+  if(connected)
+    Serial.println("Wifi module connected");
+  else
+    Serial.println("Wifi NOT module connected");
+  Serial1.flush(); //Clear all commands incase extra were sent
+  return connected;
+}
+
+bool waitForACK(uint32_t timeout) {
+  uint32_t startTime = millis();
+  while((millis() - startTime) < timeout)
+  {
+    if(Serial1.available()>0)
+    {
+      if(Serial1.readStringUntil(EOL).compareTo(ACK) == 0)
+      {
+        //Serial.println("ACK recieved");
+        return true;
+      }
+    }
+  }
+  Serial.println("NAK");
+  return false;
+}
+
+bool getCMD(String& incomingCmd,uint32_t timeout) {
+  uint32_t startTime = millis();
+  while(millis() - startTime < timeout)
+  {
+    if(Serial1.available() > 0)
+    {
+      incomingCmd = Serial1.readStringUntil(EOL);
+      return true;
+    }
+  }
+  return false;
+}
+
+void sendCmd(String cmd,boolean addEOL=true,bool printCMD = false) {
+  Serial1.print(cmd);
+  if(printCMD)
+    Serial.println(cmd);
+  if(addEOL) {
+    Serial1.print(EOL);
+  }
+}
+
+void transferFileNames() {
+  SdFile root;
+    SdFile file;
+    root.open("/");
+  char fileName[13];
+
+  //Send all csv file over
+  Serial.println("Transfering file names");
+  sendCmd(RDY);
+  if(waitForACK(1000)) {
+    Serial.println("Transfer started");
+    while (file.openNext(&root, O_READ)) {
+      if (file.isFile()) {
+        file.getName(fileName,13);
+        if (strcmp(FILE_EXT, &fileName[strlen(fileName)-strlen(FILE_EXT)]) == 0) {
+          //File is a csv file
+          sendCmd(fileName,true,true); //Send over files name
+          if(!waitForACK(1000)) {
+            Serial.println("Wifi didn't respond during transfer");
+            break;
+          }
+        }
+      }
+      file.close();
+    }
+    sendCmd(END,true,false); //End tranfer
+  }
+}
+
+void transferFile() {
+  //Get file name from wifi module
+  String fileName;
+  if(!getCMD(fileName,1000))
+    Serial.println("No response");
+
+  char fileNameChar[FILE_NAME_DIM];
+  fileName.toCharArray(fileNameChar,FILE_NAME_DIM);
+
+  //Convert file to csv
+  if(sd.exists(fileNameChar))
+  {
+    binFile.close(); //Close any open files just in case
+    
+    if(!binFile.open(fileNameChar)) { //Open the file requested
+      Serial.println("Couldn't open bin file");
+      return;
+    }
+    Serial.println("File opened");
+
+    sendCmd(RDY,true);
+    if(!waitForACK(5000)) {
+      Serial.println("Not ready");
+      return;
+    }
+
+    Serial.println("Sending file size");
+    //Send size of file
+    uint32_t fileSize = binFile.fileSize(); //In bytes
+    sendCmd(String(fileSize));
+    if(!waitForACK(5000)) {
+      Serial.println("Not ready after file size");
+      return;
+    }
+
+    block_t block;
+    binFile.rewind(); //Go to the begining of the file
+    printHeader(&Serial1);
+    Serial1.print(EOL);
+
+    while (binFile.read(&block , 512) == 512) {
+      if (block.count == 0) {
+        break;
+      }
+      for (uint16_t i = 0; i < block.count; i++) {
+        printData(&Serial1, &block.data[i]);
+        Serial1.print(EOL);
+        if(!waitForACK(5000))
+        {
+          Serial.println("No response");
+          return;
+        }
+      }
+    }
+  }
+  else{
+    Serial.println("File doesn't exist");
+  }
+
+  sendCmd(END,true);
+}
+
+void deleteFile() {
+  //Get file name from wifi module
+  Serial.println("Deleting file");
+  String fileName;
+  if(!getCMD(fileName,1000))
+    Serial.println("No response");
+
+  char fileNameChar[FILE_NAME_DIM];
+  fileName.toCharArray(fileNameChar,FILE_NAME_DIM);
+
+  //Convert file to csv
+  if(sd.exists(fileNameChar))
+  {
+    if(sd.remove(fileNameChar)) {
+      sendCmd(ACK); //Deletion was completed
+    }
+    else {
+      //Deletion error
+      sendCmd(ERR);
+    }
+  }
+}
 
 void setup() {
     if (ERROR_LED_PIN >= 0) {
         pinMode(ERROR_LED_PIN, OUTPUT);
     }
     Serial.begin(115200);
+    while(!Serial)
+    {
+      SysCall::yield();
+    }
 
     // Allow userSetup access to SPI bus.
     pinMode(SD_CS_PIN, OUTPUT);
     digitalWrite(SD_CS_PIN, HIGH);
+
+    pinMode(buttonLeft,INPUT);
+    pinMode(buttonRight,INPUT);
 
     // Setup sensors.
     delay(1000); //Give the sensors a chance to start up
@@ -467,7 +674,7 @@ void setup() {
 
     // Initialize at the highest speed supported by the board that is
     // not over 50 MHz. Try a lower speed if SPI errors occur.
-    if (!sd.begin(SD_CS_PIN, SD_SCK_MHZ(5))) {
+    if (!sd.begin(SD_CS_PIN, SD_SCK_MHZ(50))) {
         sd.initErrorPrint(&Serial);
         fatalBlink();
     }
@@ -476,87 +683,129 @@ void setup() {
     {
         //Always recover a file. It might be useful
         recoverTmpFile();
-        delay(500);
+        delay(200);
     }
-
     //Define recording switch as a interrupt 
-    pinMode(recordSwitch,INPUT_PULLDOWN);
-    //attachInterrupt(recordSwitch,startRecording,HIGH);
+    pinMode(recordSwitch,INPUT);
 
-    //Create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
-    xTaskCreatePinnedToCore(
-                        displayWebPageCode,   /* Task function. */
-                        "Webpage",     /* name of task. */
-                        10000,       /* Stack size of task */
-                        NULL,        /* parameter of the task */
-                        1,           /* priority of the task */
-                        &DisplayWebPage,      /* Task handle to keep track of created task */
-                        0);          /* pin task to core 0 */                  
-    delay(200); 
-    Serial.println("Webpage thread started");
-
-    //create a task that will be executed in the Task2code() function, with priority 1 and executed on core 1
-    xTaskCreatePinnedToCore(
-                        recordDataCode,   /* Task function. */
-                        "Record",     /* name of task. */
-                        10000,       /* Stack size of task */
-                        NULL,        /* parameter of the task */
-                        1,           /* priority of the task */
-                        &RecordData, /* Task handle to keep track of created task */
-                        1);          /* pin task to core 1 */
-    Serial.println("Date recording thread started");
-}
-
-void displayWebPageCode(void * parameter){
-    WiFi.softAP(ssid, password);
- 
-    Serial.println();
-    Serial.print("IP address:  ");
-    Serial.println(WiFi.softAPIP());
-    for(;;) //Keep process always running
-        delay(1);
-}
-
-void recordDataCode(void * parameter){
-    for(;;) //Keep process always running
+    //Transfer file names to esp32
+    #if USE_WIFI
+    Serial1.begin(SERIAL1_SPD);
+    if(connectWifi())
     {
-        recording = !digitalRead(recordSwitch);
-        if(recording) {
-            //detachInterrupt(recordSwitch);
-            logData();
-            delay(500);
-            recording=false;
-            //attachInterrupt(recordSwitch,startRecording,HIGH);
-        }
+      delay(1000);
+      //transferFileNames();
+      //Serial.println("Done");
+    }    
+    #else 
+    Serial.println("Wifi disabled");
+    #endif
+    
+}
+
+void checkButtons(int butLeft, int butRight) {
+  bool butLeftState = !digitalRead(butLeft);
+  bool butRightState = !digitalRead(butRight);
+
+  if(butLeftState == true)
+  {
+    //If left button is pressed change its state
+    if(buttonActive == false)
+    {
+      buttonActive = true;
+      buttonHeldTimer = millis();
+      Serial.println("Left Pressed");
     }
+    butLeftPressed = true;
+    //Serial.println("Left Pressed");
+  }
+
+  if(butRightState == true)
+  {
+    //If right button is pressed change its state
+    if(buttonActive == false)
+    {
+      buttonActive = true;
+      buttonHeldTimer = millis();
+      Serial.println("Right button pressd");
+    }
+    butRightPressed=true;
+  }
+
+  if((buttonActive == true && (millis() - buttonHeldTimer > buttonTriggerLen))
+      && longPressActive == false)
+  {
+    //If any button is pressed and the button held timer is greater than the
+    //held button length. Enable the long press
+    if(buttonLeft && buttonRight) {
+      Serial.println("Double button long press active");
+    
+      longPressActive = true;
+      //If on the record menu and holding both buttons down, start recording
+      recording = !recording;
+    }
+    
+  }
+
+  if(buttonActive == true && (butLeftState == false && butRightState == false)) {
+    //If a button was pressed in the previous loop but now none are pressed
+    //Then disable the long press and change the button state vars
+    if(longPressActive == true) {
+      Serial.println("Long press stopped");
+      longPressActive = false;
+    }
+
+    buttonActive = false;
+    butLeftPressed = false;
+    butRightPressed = false;
+  }
 }
 
 void loop() {
     //Do nothing so the esp can do wifi related stuff
-    delay(1);
-    
-    if(Serial.available())
-    {
-        char c = tolower(Serial.read());
-        // Discard extra Serial data.
-        do {
-            delay(10);
-        } while (Serial.available() && Serial.read() >= 0);
 
-        if (ERROR_LED_PIN >= 0) {
-            digitalWrite(ERROR_LED_PIN, LOW);
-        }
-            if (c == 'c') {
-            binaryToCsv();
-        } else if (c == 'l') {
-            Serial.println(F("\nls:"));
-            sd.ls(&Serial, LS_SIZE);
-        } else if (c == 'r') {
-            logData();
-        } else if (c == 't') {
-            testSensor();
-        } else {
-            Serial.println(F("Invalid entry"));
-        }
+    //recording = !digitalRead(recordSwitch);
+    checkButtons(buttonLeft,buttonRight);
+    if(recording) {
+      #if USE_WIFI
+      Serial1.flush();
+      Serial1.end();
+      #endif
+      delay(2000);
+      
+      digitalWrite(LED_BUILTIN,HIGH);
+      logData();
+      recording=false;
+      digitalWrite(LED_BUILTIN,LOW);
+      
+      delay(5);
+      #if USE_WIFI
+      Serial1.begin(SERIAL1_SPD);
+      Serial1.flush();
+      #endif
+    }
+    else if(Serial1.available() > 0)
+    {
+      //Wifi module sent something
+      String cmd = Serial1.readStringUntil(EOL);
+      if(cmd.compareTo(FNAME) == 0)
+      {
+        //Transfer file names
+        sendCmd(ACK,true);
+        transferFileNames();
+      }
+      else if(cmd.compareTo(FDATA) == 0)
+      {
+        //Transfer file data
+        sendCmd(ACK,true);
+        transferFile();
+      }
+      else if(cmd.compareTo(DEL) == 0)
+      {
+        sendCmd(ACK);
+        deleteFile();
+      }
+      Serial.println();
+      Serial1.flush();
     }
 }
